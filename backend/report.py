@@ -93,6 +93,19 @@ def generate_html_report(strategy="long_term", trade_date=None):
     includes = [r for r in a7_all if _a7(r, "recommendation") == "INCLUDE"]
     rejects = [r for r in a7_all if _a7(r, "recommendation") == "REJECT"]
 
+    # Pre-scan includes for A6 verdict counts
+    a6_approved_count = 0
+    a6_vetoed_count = 0
+    for r in includes:
+        try:
+            v = json.loads(r['review_json']).get('a6', {}).get('final_verdict', '')
+        except:
+            v = ''
+        if v == 'APPROVED':
+            a6_approved_count += 1
+        elif v == 'VETOED':
+            a6_vetoed_count += 1
+
     # ── Render HTML ──
     html = f"""<!DOCTYPE html><html><head><meta charset="utf-8">
 <title>{strategy} Pipeline Report — {trade_date[:16]}</title>
@@ -106,8 +119,8 @@ def generate_html_report(strategy="long_term", trade_date=None):
 <div class="stat"><div class="val">{macro.get('regime','?')}</div><div class="lbl">Regime</div></div>
 <div class="stat"><div class="val" style="font-size:11px">{macro.get('regime_summary','')[:40]}</div><div class="lbl">宏观判断</div></div>
 <div class="stat"><div class="val">{fl_cats[0][1] if fl_cats else 0}</div><div class="lbl">Focus List</div></div>
-<div class="stat"><div class="val">{len(includes)}</div><div class="lbl">Included</div></div>
-<div class="stat"><div class="val">{len(rejects)}</div><div class="lbl">Rejected</div></div>
+<div class="stat"><div class="val">{a6_approved_count}</div><div class="lbl">A6 Approved</div></div>
+<div class="stat"><div class="val">{a6_vetoed_count}</div><div class="lbl">A6 Vetoed</div></div>
 </div>
 <div class="narrative">{str(macro_r.get('narrative',''))[:500]}</div>
 </div>
@@ -138,84 +151,119 @@ def generate_html_report(strategy="long_term", trade_date=None):
 <td><b>{acc:+.1f}</b></td></tr>"""
     html += "</table></div>"
 
-    # ── Focus List: full breakdown ──
+    # ── Focus List: category summary only ──
     html += f"""<div class="section"><h2>Focus List — {len(fl_rows)} stocks / {len(fl_cats)} categories</h2>
 <div class="stats">"""
     for cat, n in fl_cats:
         html += f'<div class="stat"><div class="val">{n}</div><div class="lbl">{cat}</div></div>'
     html += """</div>
-<p>The Focus List is the candidate pool that feeds into A7. Stocks are classified by A2 quality + momentum.</p>
-<table><tr><th>#</th><th>Code</th><th>Name</th><th>Category</th><th>Score</th></tr>"""
-    for i, r in enumerate(fl_rows, 1):
-        html += f"<tr><td>{i}</td><td>{r['ts_code']}</td><td>{r['name']}</td><td><b>{r['tier']}</b></td><td>{r['total_score']:.0f}</td></tr>"
-    html += "</table></div>"
+<p>The Focus List is the candidate pool that feeds into A7. Stocks are classified by A2 quality + momentum. See A5 Top 50 below for the highest-scored picks.</p>
+</div>"""
 
-    # ── A7 Included + A6 review ──
-    html += f"""<div class="section"><h2>A7 Portfolio — {len(includes)} Included</h2>
-<p class="narrative">{a7_report.get('a7',{}).get('portfolio_narrative','')[:400]}</p>
-<table><tr><th>Code</th><th>Name</th><th>Conv</th><th>Weight</th><th>Tier</th><th>Rationale</th><th>A6 Risk</th><th>A6 Verdict</th><th>A6 Reasoning</th></tr>"""
-    for r in includes:
-        a7 = json.loads(r['review_json']).get('a7', {})
-        a6 = json.loads(r['review_json']).get('a6', {})
-        risk = a6.get('risk_score', '?')
-        verdict = a6.get('final_verdict', '?')
-        a6_reason = a6.get('reasoning', '')[:150]
-        verdict_cls = 'include' if verdict == 'APPROVED' else 'reject'
-        html += f"""<tr>
-<td>{r['ts_code']}</td><td>{r['name']}</td>
-<td class="include">{a7.get('conviction',0):.3f}</td>
-<td><b>{a7.get('weight',0):.0%}</b></td><td>{a7.get('tier','?')}</td>
-<td>{a7.get('rationale','')[:200]}</td>
-<td class="include">{risk}/5</td>
-<td class="{verdict_cls}"><b>{verdict}</b></td>
-<td>{a6_reason}</td></tr>"""
-    html += "</table></div>"
-
-    # ── A7 Rejected (top 20) ──
-    html += f"""<div class="section"><h2>A7 Rejected — Top 20 by Conviction</h2>
-<table><tr><th>Code</th><th>Name</th><th>Conv</th><th>Rationale</th></tr>"""
-    for r in rejects[:20]:
-        a7 = json.loads(r['review_json']).get('a7', {})
-        html += f"""<tr class="reject">
-<td>{r['ts_code']}</td><td>{r['name']}</td>
-<td>{a7.get('conviction',0):.3f}</td>
-<td>{a7.get('rationale','')[:200]}</td></tr>"""
-    html += "</table></div>"
-
-    # ── A6 Risk Review (adversarial-reviewed: all BUY + 30% sampled REJECT) ──
+    # ── A6: gather salvaged REJECTs ──
     a6_reviewed = []
     for r in a7_all:
         try:
             a6 = json.loads(r['review_json']).get('a6', {})
-            # Include only decisions that went through LLM adversarial review
-            # (rule-only fallback decisions have confidence=0.3 and "仅规则审查" reasoning)
             if a6 and a6.get('llm_confidence', 0) > 0.3:
                 a6_reviewed.append((r, a6))
         except: pass
 
-    a6_approved = [(r, a) for r, a in a6_reviewed if a.get('final_verdict') == 'APPROVED']
-    a6_vetoed = [(r, a) for r, a in a6_reviewed if a.get('final_verdict') == 'VETOED']
+    a6_salvaged = [(r, a) for r, a in a6_reviewed
+                    if a.get('final_verdict') == 'OVERRIDE_RECOMMENDED']
 
-    if a6_reviewed:
-        html += f"""<div class="section"><h2>A6 Risk Review — {len(a6_approved)} Approved + {len(a6_vetoed)} Vetoed</h2>"""
-        if a6_vetoed:
-            html += """<h3>⚠️ Vetoed</h3><table><tr><th>Code</th><th>Name</th><th>Risk</th><th>Recommendation</th><th>Reasoning</th><th>Veto Reason</th></tr>"""
-            for r, a in a6_vetoed:
-                html += f"""<tr class="reject">
+    # ── A6 最终决策（审批通过 + 低风险找回合并）──
+    html += f"""<div class="section"><h2>A6 最终决策 — {a6_approved_count + len(a6_salvaged)} 只（{a6_approved_count} 审批通过 + {len(a6_salvaged)} 低风险找回）</h2>
+<p class="narrative">{a7_report.get('a7',{}).get('portfolio_narrative','')[:400]}</p>
+<table><tr><th>类型</th><th>Code</th><th>Name</th><th>Conv</th><th>Weight</th><th>Tier</th><th>A6 Risk</th><th>A7 理由</th><th>A6 审查意见</th></tr>"""
+    # Approved rows (from includes)
+    for r in includes:
+        a7 = json.loads(r['review_json']).get('a7', {})
+        a6 = json.loads(r['review_json']).get('a6', {})
+        risk = a6.get('risk_score', '?')
+        verdict = a6.get('final_verdict', '')
+        a6_reason = a6.get('reasoning', '')[:150]
+        row_cls = 'include' if verdict == 'APPROVED' else 'reject'
+        html += f"""<tr class="{row_cls}">
+<td><b>{'✅ 审批通过' if verdict == 'APPROVED' else '❌ 否决'}</b></td>
 <td>{r['ts_code']}</td><td>{r['name']}</td>
-<td>{a.get('risk_score','?')}/5</td><td>{a.get('recommendation','?')}</td>
-<td>{a.get('reasoning','')[:200]}</td><td>{a.get('veto_reason','')}</td></tr>"""
-            html += "</table>"
-        if a6_approved:
-            html += """<h3>✅ Approved</h3><table><tr><th>Code</th><th>Name</th><th>Risk</th><th>Recommendation</th><th>Reasoning</th><th>Rule Checks</th></tr>"""
-            for r, a in a6_approved:
-                rules = "; ".join(f"{c['severity']}/{c['dim']}" for c in a.get('rule_checks', [])[:4])
-                html += f"""<tr class="include">
+<td class="include">{a7.get('conviction',0):.3f}</td>
+<td><b>{a7.get('weight',0):.0%}</b></td><td>{a7.get('tier','?')}</td>
+<td class="include">{risk}/5</td>
+<td>{a7.get('rationale','')[:150]}</td>
+<td>{a6_reason}</td></tr>"""
+    # Salvaged rows (from rejects that A6 overrode)
+    for r, a in a6_salvaged:
+        a7 = json.loads(r['review_json']).get('a7', {})
+        detail = a.get('override_reason') or a.get('reasoning', '')
+        html += f"""<tr class="include">
+<td><b>🔄 低风险找回</b></td>
 <td>{r['ts_code']}</td><td>{r['name']}</td>
-<td>{a.get('risk_score','?')}/5</td><td>{a.get('recommendation','?')}</td>
-<td>{a.get('reasoning','')[:200]}</td><td>{rules}</td></tr>"""
-            html += "</table>"
-        html += "</div>"
+<td class="include">{a7.get('conviction',0):.3f}</td>
+<td>—</td><td>{a7.get('tier','?')}</td>
+<td class="include">{a.get('risk_score','?')}/5</td>
+<td>{a7.get('rationale','')[:150]}</td>
+<td>{detail[:150]}</td></tr>"""
+    html += "</table></div>"
+
+    # ── Summary Table: A6 Approved + A6 Salvaged REJECT ──
+    summary_rows = []
+    for r in a7_all:
+        try:
+            a7 = json.loads(r['review_json']).get('a7', {})
+            a6 = json.loads(r['review_json']).get('a6', {})
+        except:
+            continue
+        if not a6:
+            continue
+        verdict = a6.get('final_verdict', '')
+        a7_rec = a7.get('recommendation', '')
+        if verdict == 'APPROVED' and a7_rec == 'INCLUDE':
+            row_type = 'A6 审批通过'
+        elif verdict == 'OVERRIDE_RECOMMENDED' and a7_rec == 'REJECT':
+            row_type = 'A6 低风险找回'
+        else:
+            continue
+        risk_score = a6.get('risk_score', 3)
+        conviction = a7.get('conviction', 0)
+        summary_rows.append({
+            'ts_code': r['ts_code'],
+            'name': r['name'],
+            'type': row_type,
+            'conviction': conviction,
+            'risk_score': risk_score,
+            'weight': a7.get('weight', 0),
+            'a7_action': 'BUY' if a7_rec == 'INCLUDE' else 'REJECT',
+            'a7_rationale': a7.get('rationale', '')[:200],
+            'a6_reasoning': a6.get('reasoning', '')[:200],
+            'a6_recommendation': a6.get('recommendation', ''),
+            'veto_reason': a6.get('veto_reason', ''),
+            'override_reason': a6.get('override_reason', ''),
+        })
+
+    # Sort: risk_score ASC, conviction DESC
+    summary_rows.sort(key=lambda r: (r['risk_score'], -r['conviction']))
+
+    if summary_rows:
+        n_approved = sum(1 for r in summary_rows if r['type'] == 'A6 审批通过')
+        n_salvaged = sum(1 for r in summary_rows if r['type'] == 'A6 低风险找回')
+        html += f"""<div class="section"><h2>📋 最终推荐汇总 — {len(summary_rows)} 只 ({n_approved} A6审批通过 + {n_salvaged} A6低风险找回)</h2>
+<p class="narrative">按推荐优先级排序：风险越低、确信度越高越靠前。A6 审批通过 = A7 推荐买入且 A6 审查认可；A6 低风险找回 = A7 拒绝但 A6 审查发现风险可控，建议人工复核。</p>
+<table><tr>
+<th>#</th><th>Code</th><th>Name</th><th>类型</th><th>Conv</th><th>A6 风险</th><th>A7</th><th>Weight</th><th>A7 理由</th><th>A6 审查意见</th>
+</tr>"""
+        for i, r in enumerate(summary_rows, 1):
+            type_cls = 'include' if r['type'] == 'A6 审批通过' else ''
+            weight_str = f"{r['weight']:.0%}" if r['a7_action'] == 'BUY' else '—'
+            detail = r['override_reason'] if r['type'] == 'A6 低风险找回' else r['a6_reasoning']
+            html += f"""<tr class="{type_cls}">
+<td>{i}</td><td>{r['ts_code']}</td><td>{r['name']}</td>
+<td><b>{r['type']}</b></td>
+<td class="include">{r['conviction']:.3f}</td>
+<td class="include">{r['risk_score']}/5</td>
+<td>{r['a7_action']}</td><td>{weight_str}</td>
+<td>{r['a7_rationale']}</td><td>{detail}</td></tr>"""
+        html += "</table></div>"
 
     html += "</body></html>"
 

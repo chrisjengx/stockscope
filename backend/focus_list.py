@@ -174,18 +174,18 @@ def rebuild(strategy="long_term"):
 
         # Per-strategy TOP_PCT: long_term regime-aware, hot_picks fixed
         if strategy == "long_term":
-            base_pct = 0.40
+            base_pct = 0.30
             try:
                 mr = conn.execute(
                     "SELECT regime FROM macro_regime ORDER BY calc_date DESC LIMIT 1"
                 ).fetchone()
                 regime = mr["regime"] if mr else ""
                 if "熊市" in str(regime) or "BEAR" in str(regime).upper():
-                    top_pct = base_pct * 0.55  # BEAR: 22%
+                    top_pct = base_pct * 0.55  # BEAR: ~16.5%
                 elif "牛市" in str(regime) or "BULL" in str(regime).upper():
-                    top_pct = base_pct  # BULL: 40%
+                    top_pct = base_pct  # BULL: 30%
                 else:
-                    top_pct = base_pct * 0.80  # NEUTRAL: 32%
+                    top_pct = base_pct * 0.80  # NEUTRAL: 24%
             except Exception:
                 top_pct = base_pct
         else:

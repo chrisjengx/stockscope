@@ -204,7 +204,7 @@ def calc_momentum(conn, target_codes):
             "d120": _pct(120) if len(closes) > 120 else _pct(60),
             "vol_ratio": vol_ratio,
         }
-        accel = round(raw["d5"] - raw["d20"], 1)
+        accel = round(raw["d3"] * 5/3 - raw["d5"], 1)
 
         # Detect recent trading suspensions: gap > 5 calendar days between consecutive rows
         has_gap = False
@@ -548,9 +548,9 @@ def fusion_synthesis(top_n, macro_report, macro_regime, strategy,
         d20 = m_raw.get("d20", 0)
         d60 = m_raw.get("d60", 0)
 
-        if accel > 5: stage = "ACCEL"
-        elif accel > -2: stage = "SUSTAIN"
-        elif accel > -8: stage = "DECEL"
+        if accel > 3: stage = "ACCEL"
+        elif accel > 0: stage = "SUSTAIN"
+        elif accel > -3: stage = "DECEL"
         else: stage = "REVERSE"
 
         lines.append(
@@ -569,7 +569,7 @@ def fusion_synthesis(top_n, macro_report, macro_regime, strategy,
         "",
         "分析维度:",
         "1. **排名结构**: 前列股票主要由什么因子驱动（动量/基本面/多因子共振）？当前宏观环境是否支持这个驱动力？",
-        "2. **趋势阶段**: 为每只展示的股票标注趋势阶段——ACCELERATING/SUSTAINING/DECELERATING/REVERSING。参考acc=d5-d20。",
+        "2. **趋势阶段**: 为每只展示的股票标注趋势阶段——ACCELERATING/SUSTAINING/DECELERATING/REVERSING。参考acc=d3*5/3-d5(短期加速度)。",
         "3. **市场叙事**: 当前市场在奖励什么类型的股票？这个格局在下一周可能如何演变？",
         "",
         "输出JSON:",

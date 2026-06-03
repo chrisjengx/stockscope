@@ -67,13 +67,13 @@ def compute_conviction(code, a5_scores, a2_report, fusion_fragility, macro_regim
     # Momentum quality (25%): multi-timeframe signal assessment, v3
     # Priority: acceleration + d3 early signal > duration of trend
     # d3>0 is the earliest reversal indicator — strongly rewarded
-    if momentum_d3 > 0 and momentum_d5 > 0 and momentum_accel > 5:
+    if momentum_d3 > 0 and momentum_d5 > 0 and momentum_accel > 3:
         momentum_quality = 1.0   # confirmed upturn + accelerating — strongest
-    elif momentum_d5 > 0 and momentum_accel > 5:
+    elif momentum_d5 > 0 and momentum_accel > 3:
         momentum_quality = 0.90  # rising + accelerating
     elif momentum_d3 > 0 and momentum_d5 > 0:
         momentum_quality = 0.80  # short+mid term confirmed upturn
-    elif momentum_d3 > 0 and momentum_accel > 5:
+    elif momentum_d3 > 0 and momentum_accel > 3:
         momentum_quality = 0.70  # d3 just turned positive + acc strong — early reversal signal
     elif momentum_d3 > 0 and momentum_accel > 0:
         momentum_quality = 0.60  # d3 positive + trend improving — early stage
@@ -81,13 +81,13 @@ def compute_conviction(code, a5_scores, a2_report, fusion_fragility, macro_regim
         momentum_quality = 0.55  # rising, not decelerating
     elif momentum_d5 > 0:
         momentum_quality = 0.45  # basic uptrend
-    elif momentum_d5 < 0 and momentum_accel > 10:
+    elif momentum_d5 < 0 and momentum_accel > 3:
         momentum_quality = 0.30  # still falling, slowing fast (not yet reversal)
     elif momentum_d5 < 0 and momentum_accel > 0:
         momentum_quality = 0.20  # falling but slowing slightly
-    elif momentum_accel < -20:
+    elif momentum_accel < -5:
         momentum_quality = 0.10  # strong deceleration
-    elif momentum_accel < -8:
+    elif momentum_accel < -3:
         momentum_quality = 0.15  # moderate deceleration
     else:
         momentum_quality = 0.35  # neutral / indeterminate
@@ -273,7 +273,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             ["[long_term] 选股指引(强烈建议, 非硬规则):",
              "  1. d3<0 且 d5<0 → 短期仍在下跌, 强烈建议REJECT(LLM可酌情纳入,需在rationale中明确说明)",
              "  2. HIGH红旗 → 高风险警告, 建议REJECT(LLM可酌情纳入,需明确反驳理由)",
-             "  以下可酌情: acc:-1~-8且d5>0=正常盘整可纳, acc:-8~-20但d20/d60>0=降权, acc<-20=拒绝"]
+             "  以下可酌情: acc:0~-3且d5>0=正常盘整可纳, acc:-3~-5但d20/d60>0=降权, acc<-5=谨慎"]
         ),
         "",
         "通用:",
@@ -659,7 +659,7 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
 
         # Sort by conviction, take enough for LLM to choose from
         focus_convictions.sort(key=lambda x: -x[1])
-        sample_pct = 0.60 if strategy == "long_term" else 1.0
+        sample_pct = 0.50 if strategy == "long_term" else 0.80
         max_candidates = max(15, int(len(focus_convictions) * sample_pct))
         pool_codes = [c for c, _ in focus_convictions[:max_candidates]]
 
