@@ -810,7 +810,7 @@ def _scheduler_loop():
     global _scheduler_running
     _scheduler_running = True
     logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:05, "
-                "data@16:30(full), A0@18:00(Mon-Sat), pipeline2@19:00, A2 start@20:00")
+                "data@16:30(full), A0@19:00(Mon-Sat), pipeline2@19:25, A2 start@20:00")
 
     while _scheduler_running:
         now = datetime.now()
@@ -881,9 +881,9 @@ def _scheduler_loop():
             except Exception as e:
                 logger.error(f"Scheduler data fetch 16:30 failed: {e}")
 
-        # ── 18:00: A0 Gate daily (Mon-Sat only) ──
-        if weekday != 6 and hour == 18 and minute >= 0 and minute < 5 and last.get("a0_daily") != today:
-            logger.info("Scheduler: 18:00 A0 Gate daily (Mon-Sat)")
+        # ── 19:00: A0 Gate daily (Mon-Sat only) ──
+        if weekday != 6 and hour == 19 and minute >= 0 and minute < 5 and last.get("a0_daily") != today:
+            logger.info("Scheduler: 19:00 A0 Gate daily (Mon-Sat)")
             try:
                 from backend.agents.agent_0_tier import run as a0_run
                 threading.Thread(target=a0_run, kwargs={"mode": "weekly"}, daemon=True).start()
@@ -891,9 +891,9 @@ def _scheduler_loop():
             except Exception as e:
                 logger.error(f"Scheduler A0 18:00 failed: {e}")
 
-        # ── Pipeline #2: 19:00 daily ──
-        if hour == 19 and minute >= 0 and minute < 5 and last.get("pipeline_19") != today:
-            logger.info("Scheduler: 19:00 pipeline both + HTML report (2nd run)")
+        # ── Pipeline #2: 19:25 daily ──
+        if hour == 19 and minute >= 25 and minute < 30 and last.get("pipeline_19") != today:
+            logger.info("Scheduler: 19:25 pipeline both + HTML report (2nd run)")
             try:
                 from backend.orchestrator import get_orchestrator
                 orch = get_orchestrator()
