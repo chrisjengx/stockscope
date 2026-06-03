@@ -1,0 +1,37 @@
+# Frontend (not yet published)
+frontend/
+
+# Database (large, auto-created by schema.py)
+data/stocks.db
+data/stocks.db-*
+data/backups/
+
+# Logs
+logs/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+.claude/
+
+# Environment (API keys)
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python virtualenv
+.venv/
+venv/
+
+# Generated reports
+report/*.html

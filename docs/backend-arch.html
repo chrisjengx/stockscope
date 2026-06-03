@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>StockScope — 架构设计 v4.0</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--green:#4ade80;--red:#f87171;--yellow:#fbbf24;--purple:#c084fc;--orange:#fb923c}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;line-height:1.7;font-size:15px}
+.container{max-width:1400px;margin:0 auto;padding:28px}
+h1{font-size:2.4em;margin-bottom:6px;background:linear-gradient(135deg,var(--accent),var(--purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+h2{font-size:1.5em;margin:52px 0 18px;padding-bottom:10px;border-bottom:2px solid var(--border);color:var(--accent)}
+h3{font-size:1.15em;margin:28px 0 12px;color:var(--text)}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;margin:18px 0}
+code{background:rgba(56,189,248,.1);color:var(--accent);padding:2px 7px;border-radius:4px;font-size:.88em}
+pre{background:#0f172a;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;font-size:.82em;color:var(--muted)}
+table{width:100%;border-collapse:collapse;margin:14px 0}
+th,td{text-align:left;padding:10px 14px;border:1px solid var(--border);font-size:.9em}
+th{background:rgba(56,189,248,.1);color:var(--accent);font-weight:600}
+td{color:var(--muted)}
+.tag{display:inline-block;padding:3px 10px;border-radius:5px;font-size:.78em;font-weight:600}
+.tg{background:rgba(74,222,128,.15);color:var(--green)} .tr{background:rgba(248,113,113,.15);color:var(--red)}
+.ty{background:rgba(251,191,36,.15);color:var(--yellow)} .tp{background:rgba(192,132,252,.15);color:var(--purple)}
+.tb{background:rgba(56,189,248,.15);color:var(--accent)}
+.io-box{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:10px 0}
+.io-in{background:rgba(74,222,128,.05);border:1px solid rgba(74,222,128,.2);border-radius:8px;padding:12px}
+.io-out{background:rgba(56,189,248,.05);border:1px solid rgba(56,189,248,.2);border-radius:8px;padding:12px}
+.io-label{font-size:.82em;font-weight:700;margin-bottom:6px}
+ul{margin-left:22px}li{margin-bottom:5px}
+.diagram{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin:16px 0;text-align:center}
+.changelog{font-size:.85em;color:var(--muted);border-left:3px solid var(--accent);padding-left:14px;margin:10px 0}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'dark',themeVariables:{primaryColor:'#1e3a5f',primaryTextColor:'#e2e8f0',primaryBorderColor:'#3b82f6',secondaryColor:'#1e293b',secondaryTextColor:'#e2e8f0',secondaryBorderColor:'#475569',lineColor:'#475569',fontSize:'14px'},flowchart:{useMaxWidth:true,htmlLabels:true,curve:'basis'}})</script>
+</head>
+<body>
+<div class="container">
+
+<h1>StockScope 架构设计 v4.0</h1>
+<p style="color:var(--muted);font-size:1.1em">9-Agent Pipeline + A2 Night Worker · 双策略 (long_term + hot_picks) · LLM 对抗决策 · 全链路透明</p>
+<div class="changelog">
+<b>v4.0 核心变更 (2026-06-02)</b>:<br>
+• <b>定性替代定量</b>: risk_budget 数字消除 → regime_summary 语言描述，LLM 自主判断<br>
+• <b>A4 全重写</b>: THS 同花顺板块数据 (90 行业 5419 股)、统一 30/20/10/5 时间窗口、regime 分类对称化<br>
+• <b>A7 双策略分叉</b>: Conviction/Tier/Role/Sell 全部按策略差异化；去量化约束；板块偏好注入<br>
+• <b>A5 简化</b>: 删除 macro_score 函数、删除 regime scaling、统一一套权重 (tech20/fund35/mom30/rs15)<br>
+• <b>A3 LLM 实体链接</b>: 新闻-股票关联由 LLM 识别替代字符串匹配<br>
+• <b>A2 纯基本面</b>: 删除价格数据污染、删除风险预算数字<br>
+• <b>A0 趋势驱动</b>: chg_20d>0 & chg_60d>0 FAVORED，alignment+bullish Path3，check_persistent_decline 启用<br>
+• BATCH=15, A7 per-batch 7-15%, A6 risk_score 1-5 校准锚<br>
+• A2 Worker 窗口: 20:00–08:30
+</div>
+
+<div class="diagram"><div class="mermaid">
+graph LR
+    A0["A0 Gate<br/>股票分级"] --> A1["A1 Tech<br/>12技术指标"]
+    A0 --> A4["A4 Macro<br/>市场状态+板块"]
+    A0 --> A3["A3 News<br/>多源新闻"]
+    A1 --> A5["A5 Fusion<br/>多因子排名"]
+    A4 --> A5
+    A3 --> A6["A6 Risk<br/>对抗审查"]
+    A2["A2 Fund<br/>基本面(夜间)"] --> A5
+    A5 --> FL["Focus List<br/>品类分类"]
+    FL --> A7["A7 Portfolio<br/>持仓构建"]
+    A7 --> A6
+
+    style A0 fill:#1e3a5f,stroke:#3b82f6
+    style A1 fill:#1e3a5f,stroke:#3b82f6
+    style A2 fill:#2d1f4e,stroke:#c084fc
+    style A3 fill:#1e3a5f,stroke:#3b82f6
+    style A4 fill:#1e2f1e,stroke:#4ade80
+    style A5 fill:#1e3a5f,stroke:#3b82f6
+    style FL fill:#1e2f1e,stroke:#4ade80
+    style A7 fill:#2d1f1e,stroke:#f87171
+    style A6 fill:#2d1f1e,stroke:#f87171
+</div></div>
+
+<!-- ===== PIPELINE ===== -->
+<h2>Pipeline 数据流</h2>
+<div class="card">
+<table>
+<tr><th>阶段</th><th>Agent</th><th>核心职责</th><th>输入</th><th>输出</th><th>LLM</th></tr>
+<tr>
+  <td>1</td><td><span class="tag tb">A0 Gate</span></td>
+  <td>全市场股票分级: 五类 (EXCLUDED/HOLDING/FAVORED/NEUTRAL/AVOID)</td>
+  <td>stocks + daily_quotes + portfolio</td>
+  <td>tier_assignments</td>
+  <td>30% 采样</td>
+</tr>
+<tr>
+  <td>2</td><td><span class="tag tb">A1 Tech</span></td>
+  <td>12 组技术指标纯计算: MACD/RSI/Boll/MA/OBV/KDJ/K线形态</td>
+  <td>daily_quotes (120天)</td>
+  <td>indicators (JSON)</td>
+  <td><span class="tag tg">无</span></td>
+</tr>
+<tr>
+  <td>N</td><td><span class="tag tp">A2 Fund</span></td>
+  <td>夜间线程: 多季度财务分析 (baostock+akshare+10jqka)</td>
+  <td>tier_assignments (H+F+N)</td>
+  <td>fundamental_reports + financials</td>
+  <td>9维度深度分析</td>
+</tr>
+<tr>
+  <td>3</td><td><span class="tag tb">A3 News</span></td>
+  <td>四源新闻采集 + LLM 实体链接 (eastmoney/zaobao/wallstcn/10jqka)</td>
+  <td>HTTP fetch + stocks 名称表</td>
+  <td>news_feed</td>
+  <td>分类+情感+实体</td>
+</tr>
+<tr>
+  <td>2</td><td><span class="tag tg">A4 Macro</span></td>
+  <td>市场状态引擎: 30/20/10/5 多时间框架 + THS 90行业板块 + 资金流向</td>
+  <td>daily_quotes + akshare + THS</td>
+  <td>macro_regime + macro_reports</td>
+  <td>sector_view + narrative</td>
+</tr>
+<tr>
+  <td>4</td><td><span class="tag tb">A5 Fusion</span></td>
+  <td>多因子加权排名: tech(0.20)+fund(0.35)+mom(0.30)+rs(0.15)</td>
+  <td>indicators + fundamental_reports + macro_reports</td>
+  <td>composite_scores + fusion_reports</td>
+  <td>趋势阶段分析</td>
+</tr>
+<tr>
+  <td>5</td><td><span class="tag tg">FL</span></td>
+  <td>百分位品类分类: 价值型/成长型/稳健型/动量型/突破型/短期交易型</td>
+  <td>composite_scores + A2 reports</td>
+  <td>focus_list (strategy-specific)</td>
+  <td><span class="tag tg">无</span></td>
+</tr>
+<tr>
+  <td>6</td><td><span class="tag tr">A7 Portfolio</span></td>
+  <td>三层持仓构建: Conviction(数学)→LLM选股→硬约束</td>
+  <td>focus_list + composite_scores + A2/A4/A5 reports</td>
+  <td>portfolio_decisions + portfolio_reports</td>
+  <td>分批构建(15/批)</td>
+</tr>
+<tr>
+  <td>7</td><td><span class="tag tr">A6 Risk</span></td>
+  <td>对抗审查: 程序化+(risk_score 1-5 校准锚)+对抗裁决</td>
+  <td>portfolio_decisions + 所有上游报告</td>
+  <td>APPROVED/VETOED/OVERRIDE</td>
+  <td>风险标注(15/批)</td>
+</tr>
+</table>
+</div>
+
+<!-- ===== A0 ===== -->
+<h2>A0 — Universe Manager (股票分级)</h2>
+<div class="card">
+<h3>决策树 (优先级从上到下)</h3>
+<pre>
+1. EXCLUDED: ST/退市 | 60日均量<1000万 | 上市<60天
+2. HOLDING: 已在 portfolio 持仓
+3. AVOID: d5<0 & d20<0 & d30<0 (三周期同步下跌)
+4. AVOID: MA60以下占比≥70% & MA空头 & 近20日低点 (持续阴跌)
+5. classify_stocks (剩余):
+   Path 1 (rule_direct): FAVORED=chg_20d>0 & chg_60d>0 | AVOID=流动性<3000万/振幅>80%
+   Path 2 (LLM 30% 随机采样): FAVORED/NEUTRAL/AVOID
+   Path 3 (rule_default): FAVORED=bullish & vs_ma60>0 | AVOID=bearish & vs_ma60<0 | NEUTRAL=其余
+</pre>
+<div class="io-box">
+<div class="io-in"><div class="io-label" style="color:var(--green)">输入</div>
+• stocks: 全量代码 + ST标记 + 上市日期<br>
+• daily_quotes: close/volume/amount 120日<br>
+• portfolio: 当前持仓<br>
+• tier_assignments: 上一轮分级结果
+</div>
+<div class="io-out"><div class="io-label" style="color:var(--accent)">输出</div>
+• tier_assignments: {ts_code, tier, reason, confidence, source, updated_at}<br>
+• 5个 Tier: EXCLUDED→HOLDING→FAVORED→NEUTRAL→AVOID<br>
+• 下游: A1 (只处理 H+F+N)
+</div></div></div>
+
+<!-- ===== A7 ===== -->
+<h2>A7 — Portfolio Constructor (持仓构建, 核心)</h2>
+<div class="card">
+<h3>三层架构</h3>
+<pre>
+Layer 1: Conviction (纯数学, 零 LLM) — 策略分叉权重
+  long_term: base(0.25) + mom_quality(0.25) + a2(0.15) + fragility(0.15) + penalty(0.20)
+  hot_picks: base(0.25) + mom_quality(0.35) + a2(0.08) + fragility(0.12) + penalty(0.20)
+
+Layer 2: LLM 选股 (分批, 15只/批, 7-15%纳入)
+  每批得到: 宏观环境 + 板块资金偏好 + 市场新闻 + A5趋势分析 + 策略差异化角色
+
+Layer 3: 硬约束 (安全网)
+  权重≥min, ≤max | 总仓位≤1-min_cash | 安全上限25只
+</pre>
+
+<h3>Bounded Authority (策略分叉)</h3>
+<table>
+<tr><th>Tier</th><th>long_term</th><th>hot_picks</th><th>LLM 权限</th></tr>
+<tr><td>STRONG</td><td>conv ≥ 0.50</td><td>conv ≥ 0.45</td><td>必须纳入, 8-25%</td></tr>
+<tr><td>MODERATE</td><td>conv ≥ 0.30</td><td>conv ≥ 0.25</td><td>可选, 8-15%</td></tr>
+<tr><td>WEAK</td><td>conv < 0.30</td><td>conv < 0.25</td><td>自动剔除</td></tr>
+</table>
+
+<h3>LLM 角色 (策略分叉)</h3>
+<div class="io-box">
+<div class="io-in"><div class="io-label" style="color:var(--green)">long_term — 价值侦察兵</div>
+持仓 2-4 周 · 选股优先级: 趋势质量 > 基本面支撑 > 估值合理性<br>
+HIGH 红旗 → 建议 REJECT
+</div>
+<div class="io-out"><div class="io-label" style="color:var(--accent)">hot_picks — 热点猎手</div>
+持仓 3-5 天 · 选股优先级: 动量强度 > 量价配合 > 基本面(仅查硬伤)<br>
+硬规则: d3<0 且 d5<-5 且 acc<0 → 必须 REJECT
+</div></div>
+
+<h3>Conviction 动量质量级联</h3>
+<pre>
+d3>0, d5>0, acc>5  → 1.00  (确认上升+加速 — 最强信号)
+d5>0, acc>5        → 0.90  (上升+加速)
+d3>0, d5>0         → 0.80  (确认上升)
+d3>0, acc>5        → 0.70  (早期反转信号 — 最强早期指标)
+d3>0, acc>0        → 0.60  (趋势改善)
+...
+acc<-20            → 0.10  (强减速 — 回避)
+</pre>
+</div>
+
+<!-- ===== A6 ===== -->
+<h2>A6 — Risk Officer (对抗审查)</h2>
+<div class="card">
+<h3>双重审查 + 裁决</h3>
+<pre>
+程序化检查 (6维度): 流动性 | 行业集中 | 持仓上限 | 估值极端 | 动量衰竭 | 信号冲突
+LLM 深度审查: 读取 A1/A2/A3/A4/A5/A7 全部报告, 输出 risk_score 1-5
+
+risk_score 校准锚:
+  1=无可见风险 · 2=轻微疑虑 · 3=需关注 · 4=显著风险建议VETO · 5=致命风险强制VETO
+
+裁决: risk≥4→VETO | 排名前60%→APPROVED | 排名后40%→VETO
+      REJECT+低风险 → OVERRIDE (建议人工复核)
+</pre>
+<div class="io-box">
+<div class="io-in"><div class="io-label" style="color:var(--green)">输入</div>
+• portfolio_decisions (A7产出)<br>
+• A1 indicators: MACD/RSI/MA/OBV<br>
+• A2 fundamental_reports: earnings/financial/red_flags<br>
+• A3 news_feed: per-stock + market background<br>
+• A4 macro_reports: regime_summary + sector_view + risk_alerts<br>
+• A5 fusion_reports + composite_scores
+</div>
+<div class="io-out"><div class="io-label" style="color:var(--accent)">输出</div>
+• portfolio_decisions: 更新 status=APPROVED/VETOED/OVERRIDE_RECOMMENDED<br>
+• review_json: {a6: {risk_score, recommendation, reasoning, conditions, final_verdict}}<br>
+• risk_flags 表: 逐条风险标记
+</div></div></div>
+
+<!-- ===== A4 ===== -->
+<h2>A4 — Macro Strategist (宏观策略)</h2>
+<div class="card">
+<h3>数据源</h3>
+<table>
+<tr><th>数据</th><th>来源</th><th>覆盖</th></tr>
+<tr><td>市场趋势/宽度/量/NHNL</td><td>daily_quotes DB 聚合 (30/20/10/5 窗口)</td><td>全市场</td></tr>
+<tr><td>上证指数 K 线</td><td>akshare stock_zh_index_daily</td><td>30d/20d/10d/5d</td></tr>
+<tr><td>板块热度 (快照+K线)</td><td><span class="tag tg">THS 同花顺</span> stock_board_industry_summary_ths + index_ths</td><td>87 行业 / 5396 股</td></tr>
+<tr><td>估值 PE/PB</td><td>akshare stock_market_pe_lg + stock_a_all_pb</td><td>当日</td></tr>
+</table>
+
+<h3>Regime 分类 (对称 2×2)</h3>
+<pre>
+t20>5  & b20>55  → 牛市上升    (强势+广参与)
+t20>0  & b20>45  → 牛市整理    (上涨+参与尚可)
+t20<-5 & b20<35  → 熊市下行    (暴跌+广度崩溃)
+t20<0  & b20<45  → 熊市整理    (偏弱)
+else            → 中性震荡    (默认中性, 不是默认熊市)
+</pre>
+<p>NH/NL、波动率、量比 → 作为定性备注写入 regime_summary, 不改变 regime 标签</p>
+
+<h3>板块数据格式</h3>
+<pre>领涨 Top 10: 元件 5d+3.9% 3d+2.1% 最新+3.9% (60只, 涨45/15, 净入+47亿) | ...
+领跌 Top 10: 影视院线 5d-4.3% 3d-2.1% 最新-4.3% (20只, 涨1/19, 净出-11亿) | ...
+资金流入 Top 5: 通信设备 净入+219亿 | 半导体 净入+81亿 | ...
+板块结构: 21涨/69跌, 全市场净流入+154亿</pre>
+</div>
+
+<!-- ===== A5 ===== -->
+<h2>A5 — Multi-factor Fusion (多因子排名)</h2>
+<div class="card">
+<h3>通用权重 (策略无关)</h3>
+<pre>
+total_score = tech×0.20 + fundamental×0.35 + momentum×0.30 + relative_strength×0.15
+</pre>
+<p>FL 负责策略分类 (价值型/成长型 → long_term, 动量型/突破型 → hot_picks)。A5 只管排对顺序。</p>
+
+<h3>因子计算</h3>
+<table>
+<tr><th>因子</th><th>来源</th><th>说明</th></tr>
+<tr><td>tech_score</td><td>A1 indicators → _compute_tech_score()</td><td>MACD+RSI+Boll+MA+OBV+VR 加权</td></tr>
+<tr><td>fundamental_score</td><td>A2 reports → compute_fund_score_from_report()</td><td>earnings(±25)+health(±20)+val(±20)+red_flags+confidence</td></tr>
+<tr><td>momentum</td><td>daily_quotes → calc_momentum()</td><td>d3/d5/d10/d20/d60/d120 + vol_ratio 量价确认</td></tr>
+<tr><td>relative_strength</td><td>stock vs market median</td><td>d5和d20 偏离市场中枢的程度</td></tr>
+</table>
+</div>
+
+<!-- ===== 调度 ===== -->
+<h2>调度时间</h2>
+<div class="card">
+<table>
+<tr><th>时间</th><th>事件</th><th>说明</th></tr>
+<tr><td>08:30</td><td>A2 停止</td><td>夜间窗口结束 (20:00-08:30)</td></tr>
+<tr><td>13:15</td><td>数据拉取</td><td>定向: HOLDING+FAVORED+NEUTRAL</td></tr>
+<tr><td>14:05</td><td>Pipeline #1</td><td>both 策略 + HTML 报告</td></tr>
+<tr><td>16:30</td><td>数据拉取</td><td>全量: 全 ticker 收盘数据</td></tr>
+<tr><td>18:00</td><td>A0 Gate</td><td>周一到周六, 冷/热启动自适应</td></tr>
+<tr><td>19:00</td><td>Pipeline #2</td><td>both 策略 + HTML 报告</td></tr>
+<tr><td>20:00</td><td>A2 启动</td><td>夜间窗口开始, 增量分析 7 天未更新股票</td></tr>
+</table>
+</div>
+
+<!-- ===== 双策略 ===== -->
+<h2>双策略设计</h2>
+<div class="card">
+<table>
+<tr><th>维度</th><th>long_term</th><th>hot_picks</th></tr>
+<tr><td>持仓周期</td><td>2-4 周</td><td>3-5 天</td></tr>
+<tr><td>FL 品类</td><td>价值型 + 成长型 + 稳健型</td><td>动量型 + 突破型 + 短期交易型</td></tr>
+<tr><td>FL 宽度 (牛市/中性/熊市)</td><td>40% / 32% / 22%</td><td>50% (固定)</td></tr>
+<tr><td>Conviction 动量权重</td><td>25%</td><td>35%</td></tr>
+<tr><td>Conviction 基本面权重</td><td>15%</td><td>8%</td></tr>
+<tr><td>STRONG 门槛</td><td>≥0.50</td><td>≥0.45</td></tr>
+<tr><td>卖出风格</td><td>保守: 止损-10% / 止盈+15%</td><td>积极: 时间止损5日 / 排名>60%清仓</td></tr>
+<tr><td>LLM 角色</td><td>价值侦察兵: 趋势质量+基本面</td><td>热点猎手: 动量强度+量价</td></tr>
+<tr><td>LLM override 卖出</td><td>可以拯救</td><td>不可以 — 动量衰减必须卖</td></tr>
+</table>
+</div>
+
+<!-- ===== 设计原则 ===== -->
+<h2>核心设计原则</h2>
+<div class="card">
+<ol>
+<li><b>定性替代定量</b>: risk_budget 数字消除, 改为 regime_summary + sector_view + risk_alerts 语言描述。LLM 自己判断, 不用数字约束。</li>
+<li><b>数学做安全网, LLM 做增值</b>: Conviction 纯数学防止系统性错误, LLM 在安全边界内做定性判断。Bounded Authority 保证 LLM 不能越过数据边界。</li>
+<li><b>板块是偏好不是约束</b>: A4 sector_view→A7/A6, 同一段数据 A7 找机会、A6 找风险。LLM 自己判断, 没有硬性限制。</li>
+<li><b>数据不重复加工</b>: A1→A5 读 JSON 不重算。A2→A5→A7 单向流动。A4 一处产出、三处消费。</li>
+<li><b>对抗决策</b>: A7 乐观推荐, A6 悲观审查。A7 问"为什么涨", A6 问"A7 漏了什么"。</li>
+</ol>
+</div>
+
+<div class="changelog" style="margin-top:40px">
+<b>v4.0 · 2026-06-02</b> — 本轮改动覆盖 8 个 Agent, 0 regression。详见 agent review 对话记录。
+</div>
+
+</div></body></html>

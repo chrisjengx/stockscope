@@ -1,0 +1,59 @@
+<mxGraphModel dx="1400" dy="900" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900">
+  <root><mxCell id="0"/><mxCell id="1" parent="0"/>
+  <mxCell id="title" value="StockScope v2.1 — Pipeline 执行流程" style="text;fontSize=22;fontStyle=1;fontColor=#38BDF8;align=center;" vertex="1" parent="1"><mxGeometry x="350" y="15" width="700" height="35" as="geometry"/></mxCell>
+
+  <!-- Daily mode -->
+  <mxCell id="daily-label" value="daily 模式 (11:00 + 14:30 · ~2min)" style="text;fontSize=14;fontColor=#3B82F6;align=left;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="40" y="70" width="300" height="25" as="geometry"/></mxCell>
+  <mxCell id="d-skip" value="⚡ 跳过 A0&lt;br&gt;(仅weekly更新Tier分级)" style="rounded=1;fillColor=#1E293B;strokeColor=#64748B;strokeDasharray=3;fontSize=11;fontColor=#94A3B8;" vertex="1" parent="1"><mxGeometry x="60" y="110" width="130" height="50" as="geometry"/></mxCell>
+  <mxCell id="d-a3" value="&lt;b&gt;A3&lt;/b&gt; News&lt;br&gt;~3s" style="rounded=1;fillColor=#1E293B;strokeColor=#C084FC;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="230" y="110" width="90" height="50" as="geometry"/></mxCell>
+  <mxCell id="d-a1" value="&lt;b&gt;A1&lt;/b&gt; Technical&lt;br&gt;112只 · 0.2s" style="rounded=1;fillColor=#1E293B;strokeColor=#4ADE80;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="370" y="95" width="120" height="50" as="geometry"/></mxCell>
+  <mxCell id="d-a4" value="&lt;b&gt;A4&lt;/b&gt; Macro&lt;br&gt;~2s" style="rounded=1;fillColor=#1E293B;strokeColor=#38BDF8;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="370" y="155" width="120" height="50" as="geometry"/></mxCell>
+  <mxCell id="d-parallel-label" value="并行" style="text;fontSize=10;fontColor=#64748B;align=center;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="370" y="75" width="120" height="18" as="geometry"/></mxCell>
+  <mxCell id="d-a5" value="&lt;b&gt;A5&lt;/b&gt; Fusion&lt;br&gt;多因子融合打分 · ~5s" style="rounded=1;fillColor=#1E293B;strokeColor=#F59E0B;fontSize=12;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="540" y="110" width="170" height="55" as="geometry"/></mxCell>
+  <mxCell id="d-a7" value="&lt;b&gt;A7&lt;/b&gt; Portfolio&lt;br&gt;持仓审查+买卖决策 · ~4s" style="rounded=1;fillColor=#1E293B;strokeColor=#3B82F6;fontSize=12;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="540" y="210" width="200" height="55" as="geometry"/></mxCell>
+  <mxCell id="d-fl" value="&lt;b&gt;Focus List&lt;/b&gt;&lt;br&gt;情景化选股" style="shape=cylinder;fillColor=#1E293B;strokeColor=#EC4899;fontSize=11;fontColor=#E2E8F0;size=0.12;" vertex="1" parent="1"><mxGeometry x="540" y="310" width="110" height="55" as="geometry"/></mxCell>
+  <mxCell id="d-rpt" value="&lt;b&gt;HTML Report&lt;/b&gt;&lt;br&gt;long_term + hot_picks" style="rounded=1;fillColor=#1E293B;strokeColor=#10B981;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="680" y="310" width="150" height="55" as="geometry"/></mxCell>
+  <mxCell id="d-result" value="✅ Pipeline Complete" style="text;fontSize=13;fontColor=#4ADE80;align=center;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="680" y="390" width="150" height="25" as="geometry"/></mxCell>
+
+  <!-- Daily arrows -->
+  <mxCell id="da0" style="edgeStyle=none;endArrow=classic;strokeColor=#64748B;dashed=1;" edge="1" parent="1" source="d-skip" target="d-a3"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da1" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a3" target="d-a1"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da1b" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a3" target="d-a4"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da2" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a1" target="d-a5"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="430" y="80"/><mxPoint x="625" y="80"/></Array></mxGeometry></mxCell>
+  <mxCell id="da2b" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a4" target="d-a5"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da3" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a5" target="d-a7"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da4" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-a7" target="d-fl"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da5" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="d-fl" target="d-rpt"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="da6" style="edgeStyle=none;endArrow=classic;strokeColor=#4ADE80;" edge="1" parent="1" source="d-rpt" target="d-result"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+  <!-- Weekly mode -->
+  <mxCell id="weekly-label" value="weekly 模式 (周日 18:30 · ~25min)" style="text;fontSize=14;fontColor=#A855F7;align=left;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="40" y="460" width="350" height="25" as="geometry"/></mxCell>
+  <mxCell id="w-a0" value="&lt;b&gt;A0 Gate&lt;/b&gt;&lt;br&gt;⭐ 全量5517只 Tier分级&lt;br&gt;~19min · LLM" style="rounded=1;fillColor=#1E3A5F;strokeColor=#3B82F6;strokeWidth=2;fontSize=12;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="60" y="500" width="160" height="60" as="geometry"/></mxCell>
+  <mxCell id="w-a3" value="&lt;b&gt;A3&lt;/b&gt; News&lt;br&gt;~3s" style="rounded=1;fillColor=#1E293B;strokeColor=#C084FC;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="260" y="505" width="90" height="50" as="geometry"/></mxCell>
+  <mxCell id="w-a1" value="&lt;b&gt;A1&lt;/b&gt; Technical&lt;br&gt;~4700只 · ~7s" style="rounded=1;fillColor=#1E293B;strokeColor=#4ADE80;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="400" y="490" width="130" height="50" as="geometry"/></mxCell>
+  <mxCell id="w-a4" value="&lt;b&gt;A4&lt;/b&gt; Macro&lt;br&gt;~2s" style="rounded=1;fillColor=#1E293B;strokeColor=#38BDF8;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="400" y="550" width="130" height="50" as="geometry"/></mxCell>
+  <mxCell id="w-parallel-label" value="并行" style="text;fontSize=10;fontColor=#64748B;align=center;fontStyle=2;" vertex="1" parent="1"><mxGeometry x="400" y="470" width="130" height="18" as="geometry"/></mxCell>
+  <mxCell id="w-a5" value="&lt;b&gt;A5&lt;/b&gt; Fusion&lt;br&gt;多因子融合打分 · ~5s" style="rounded=1;fillColor=#1E293B;strokeColor=#F59E0B;fontSize=12;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="580" y="505" width="170" height="55" as="geometry"/></mxCell>
+  <mxCell id="w-a7" value="&lt;b&gt;A7&lt;/b&gt; Portfolio&lt;br&gt;持仓+买卖决策 · ~4s" style="rounded=1;fillColor=#1E293B;strokeColor=#3B82F6;fontSize=12;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="580" y="600" width="200" height="55" as="geometry"/></mxCell>
+  <mxCell id="w-fl" value="&lt;b&gt;Focus List&lt;/b&gt;&lt;br&gt;情景化选股" style="shape=cylinder;fillColor=#1E293B;strokeColor=#EC4899;fontSize=11;fontColor=#E2E8F0;size=0.12;" vertex="1" parent="1"><mxGeometry x="580" y="700" width="110" height="55" as="geometry"/></mxCell>
+  <mxCell id="w-rpt" value="&lt;b&gt;HTML Report&lt;/b&gt;&lt;br&gt;宏观分析+排名表" style="rounded=1;fillColor=#1E293B;strokeColor=#10B981;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="720" y="700" width="150" height="55" as="geometry"/></mxCell>
+  <mxCell id="w-result" value="✅ 6/6 Agents OK · ~25min" style="text;fontSize=13;fontColor=#4ADE80;align=center;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="720" y="775" width="150" height="25" as="geometry"/></mxCell>
+
+  <!-- Weekly arrows -->
+  <mxCell id="wa0" style="edgeStyle=none;endArrow=classic;strokeColor=#3B82F6;strokeWidth=2;" edge="1" parent="1" source="w-a0" target="w-a3"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa1" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a3" target="w-a1"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa1b" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a3" target="w-a4"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa2" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a1" target="w-a5"><mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="465" y="475"/><mxPoint x="665" y="475"/></Array></mxGeometry></mxCell>
+  <mxCell id="wa2b" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a4" target="w-a5"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa3" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a5" target="w-a7"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa4" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-a7" target="w-fl"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa5" style="edgeStyle=none;endArrow=classic;strokeColor=#475569;" edge="1" parent="1" source="w-fl" target="w-rpt"><mxGeometry relative="1" as="geometry"/></mxCell>
+  <mxCell id="wa6" style="edgeStyle=none;endArrow=classic;strokeColor=#4ADE80;" edge="1" parent="1" source="w-rpt" target="w-result"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+  <!-- A2 Background (decoupled) -->
+  <mxCell id="a2-box" value="&lt;b&gt;A2 Worker&lt;/b&gt; (后台常驻daemon)&lt;br&gt;逐只LLM财务叙事分析&lt;br&gt;优先级 HOLDING &gt; FAVORED &gt; NEUTRAL&lt;br&gt;→ fundamental_reports 表&lt;br&gt;→ 被 A5/Focus List/A7 读取" style="rounded=1;fillColor=#1E3A5F;strokeColor=#F59E0B;strokeWidth=2;strokeDasharray=4;fontSize=11;fontColor=#E2E8F0;" vertex="1" parent="1"><mxGeometry x="40" y="610" width="250" height="110" as="geometry"/></mxCell>
+
+  <!-- Legend -->
+  <mxCell id="legend" value="A2 解耦于Pipeline · 独立常驻运行 · A6(风控)/A8(CIO) 已移除" style="text;fontSize=11;fontColor=#FBBF24;align=left;fontStyle=1;" vertex="1" parent="1"><mxGeometry x="40" y="840" width="500" height="20" as="geometry"/></mxCell>
+  </root>
+</mxGraphModel>

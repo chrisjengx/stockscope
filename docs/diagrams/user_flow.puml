@@ -1,0 +1,64 @@
+@startuml
+!theme plain
+title 股票分析系统 — SSE 事件驱动架构 v2.1
+
+actor User as "用户"
+participant "React SPA\n(:5173)" as Frontend
+participant "Flask API\n(:5001)" as API
+participant "SSE /api/events" as SSE
+database "SQLite\n(stocks.db)" as DB
+participant "Orchestrator\n(Pipeline)" as Orch
+participant "A2 Worker\n(后台daemon)" as A2Worker
+
+== 初始化 ==
+User -> Frontend: 打开应用
+Frontend -> SSE: GET /api/events\n(建立 SSE 连接)
+Frontend -> API: GET /api/dashboard
+API -> DB: 查询
+API --> Frontend: 初始数据
+
+== Pipeline Agent 完成 → SSE 推送 ==
+Orch -> DB: A4 Macro 完成\n写入 agent_logs(status=SUCCESS)
+API -> DB: 检测 agent_logs 新记录
+API -> SSE: event: agent_completed\ndata: {"agent_id":4,"status":"SUCCESS"}
+SSE --> Frontend: 收到 agent_completed
+Frontend -> Frontend: queryClient.invalidateQueries\n(['dashboard'])
+Frontend -> API: GET /api/dashboard (自动refetch)
+API --> Frontend: 最新宏观数据
+User <- Frontend: 仪表盘自动刷新
+
+== Agent 失败 → SSE 告警 ==
+Orch -> DB: A1 Technical 超时\n写入 agent_logs(status=TIMEOUT)
+API -> SSE: event: agent_failed\ndata: {"agent_id":1,"status":"TIMEOUT"}
+SSE --> Frontend: 收到 agent_failed
+Frontend -> Frontend: Toast 告警\n"A1 技术扫描超时，使用缓存数据"
+Frontend -> Frontend: queryClient.invalidateQueries
+
+== A2 Worker → 间接影响 ==
+A2Worker -> DB: A2 分析完成\n写入 fundamental_reports
+API -> DB: 检测 fundamental_reports 新记录
+API -> SSE: event: agent_completed\ndata: {"agent_id":2,"status":"SUCCESS"}
+SSE --> Frontend: 收到 agent_completed
+Frontend -> Frontend: invalidateQueries(['dashboard','stocks'])
+
+== A7 风控 → SSE 推送 ==
+Orch -> DB: A7 Portfolio 写入 RED risk_flag\nrisk_flags(severity=RED)
+API -> SSE: event: risk_alert\ndata: {"ts_code":"300750.SZ","level":"RED"}
+SSE --> Frontend: 收到 risk_alert
+Frontend -> Frontend: Toast 通知 + 高亮
+Frontend -> Frontend: invalidateQueries(['portfolio','decisions'])
+
+== A3 HIGH 级新闻 → SSE 推送 ==
+Orch -> DB: A3 News 写入 HIGH 级新闻
+API -> SSE: event: high_impact_news\ndata: {"count":3}
+SSE --> Frontend: 收到 high_impact_news
+Frontend -> Frontend: invalidateQueries(['dashboard','news'])
+
+== 用户交易 → 即时更新 ==
+User -> Frontend: POST /api/trades (录入交易)
+Frontend -> API: POST /api/trades
+API -> DB: INSERT + 计算盈亏
+API --> Frontend: {id, profit_loss}
+Frontend -> Frontend: queryClient.invalidateQueries\n(['trades','dashboard'])
+
+@enduml

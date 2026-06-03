@@ -1,0 +1,84 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Tier System">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10">
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="股票分级分析系统 (A0 Gate)" style="text;fontSize=20;fontStyle=1;fillColor=none;align=center;fontColor=#e2e8f0;" vertex="1" parent="1">
+          <mxGeometry x="250" y="10" width="400" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Stock Pool -->
+        <mxCell id="pool" value="全市场股票池 (5517只 A 股)" style="rounded=1;fillColor=#1e3a5f;strokeColor=#38bdf8;fontColor=#e2e8f0;fontSize=13;" vertex="1" parent="1">
+          <mxGeometry x="280" y="60" width="300" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="agent0_box" value="A0 Gate 分级器 (每周日 · ~19min · LLM)" style="rounded=1;fillColor=#2d2d2d;strokeColor=#a855f7;fontColor=#a855f7;fontSize=12;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="300" y="115" width="260" height="40" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="arrow_pool" style="edgeStyle=none;strokeColor=#38bdf8;endArrow=classic;strokeWidth=2;" edge="1" parent="1" source="pool" target="agent0_box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- HOLDING -->
+        <mxCell id="tier_holding" value="⭐ HOLDING · 持仓股 (5~10只)&lt;br&gt;当前持有 · 每日全量分析&lt;br&gt;A2 Worker 最高优先级" style="rounded=1;fillColor=#0f3d2e;strokeColor=#4ade80;strokeWidth=2;fontColor=#4ade80;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="185" width="280" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- FAVORED -->
+        <mxCell id="tier_favored" value="👀 FAVORED · 重点关注 (40~112只)&lt;br&gt;优质标的未持仓 · 每日分析&lt;br&gt;A2 Worker 次优先级" style="rounded=1;fillColor=#0f3d5c;strokeColor=#38bdf8;strokeWidth=2;fontColor=#38bdf8;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="340" y="185" width="280" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- NEUTRAL -->
+        <mxCell id="tier_neutral" value="📋 NEUTRAL · 一般关注 (~5170只)&lt;br&gt;基本面正常 · weekly 分析&lt;br&gt;A2 Worker 最低优先级" style="rounded=1;fillColor=#2d1f3d;strokeColor=#c084fc;fontColor=#c084fc;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="640" y="185" width="280" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- DISMISS -->
+        <mxCell id="tier_dismiss" value="❄️ DISMISS · 暂时回避 (37~43只)&lt;br&gt;ST/*ST · 退市风险 · 持续下跌&lt;br&gt;⛔ 永久跳过 · 不分析不投资" style="rounded=1;fillColor=#3d0f0f;strokeColor=#f87171;fontColor=#f87171;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="200" y="285" width="550" height="65" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows from Agent0 to Tiers -->
+        <mxCell id="a0_holding" style="edgeStyle=none;strokeColor=#4ade80;strokeWidth=2;endArrow=classic;" edge="1" parent="1" source="agent0_box" target="tier_holding">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="180" y="155"/><mxPoint x="180" y="217"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="a0_favored" style="edgeStyle=none;strokeColor=#38bdf8;strokeWidth=2;endArrow=classic;" edge="1" parent="1" source="agent0_box" target="tier_favored">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="480" y="155"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="a0_neutral" style="edgeStyle=none;strokeColor=#c084fc;endArrow=classic;" edge="1" parent="1" source="agent0_box" target="tier_neutral">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="a0_dismiss" style="edgeStyle=none;strokeColor=#f87171;endArrow=classic;" edge="1" parent="1" source="agent0_box" target="tier_dismiss">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="475" y="155"/></Array></mxGeometry>
+        </mxCell>
+
+        <!-- Upgrade/Downgrade -->
+        <mxCell id="upgrade_label" value="Tier 动态调整" style="text;fontSize=14;fontStyle=1;fontColor=#fbbf24;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="380" width="200" height="25" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="up_hold" value="卖出→FAVORED" style="edgeStyle=none;strokeColor=#4ade80;fontColor=#94a3b8;fontSize=10;endArrow=classic;" edge="1" parent="1" source="tier_holding" target="tier_favored">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="320" y="217"/></Array></mxGeometry>
+        </mxCell>
+        <mxCell id="up_fav_hold" value="买入→HOLDING" style="edgeStyle=none;strokeColor=#4ade80;fontColor=#94a3b8;fontSize=10;endArrow=classic;" edge="1" parent="1" source="tier_favored" target="tier_holding">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="up_neu_fav" value="评分进入Top20%" style="edgeStyle=none;strokeColor=#4ade80;fontColor=#94a3b8;fontSize=10;endArrow=classic;" edge="1" parent="1" source="tier_neutral" target="tier_favored">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="down_fav_dis" value="持续恶化" style="edgeStyle=none;strokeColor=#f87171;fontColor=#94a3b8;fontSize=10;endArrow=classic;" edge="1" parent="1" source="tier_favored" target="tier_dismiss">
+          <mxGeometry relative="1" as="geometry"><Array as="points"><mxPoint x="480" y="270"/></Array></mxGeometry>
+        </mxCell>
+
+        <!-- Analysis frequencies -->
+        <mxCell id="freq_box" value="A2 Worker 优先级: HOLDING (30s/只, LLM v4-pro) &gt; FAVORED &gt; NEUTRAL  |  DISMISS 不分析  |  weekly Pipeline 全量 Tier 重分类" style="rounded=1;fillColor=#1e293b;strokeColor=#f59e0b;fontColor=#94a3b8;fontSize=11;fontStyle=1;strokeDasharray=4;" vertex="1" parent="1">
+          <mxGeometry x="40" y="430" width="880" height="35" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
