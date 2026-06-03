@@ -29,7 +29,10 @@ MIN_TOTAL_SCORE = 25  # quality floor for focus list inclusion
 
 def classify_stock(r, a2_report=None, momentum_d3=None, momentum_d5=None, momentum_d20=None,
                    p80=None, p60=None, p50=None, p40=None, p30=None):
-    """Classify stock using percentile-based momentum thresholds (auto-adapts to market)."""
+    """Return list of matching categories (multi-label). Strategy-specific views, not mutually exclusive.
+
+    A stock can be both 稳健型 (for long_term) AND 动量型 (for hot_picks) simultaneously.
+    """
     has_a2 = r.get("has_a2") == 1 and a2_report is not None
     momentum = r.get("momentum") or 50
     total_score = r.get("total_score") or 40
@@ -51,52 +54,55 @@ def classify_stock(r, a2_report=None, momentum_d3=None, momentum_d5=None, moment
         val = (a2_report.get("valuation") or {}).get("rating", "?") if isinstance(a2_report.get("valuation"), dict) else "?"
         rfs = len(a2_report.get("red_flags", []))
 
-    # ── 观望型: too many flags or trash fundamentals ──
-    # A2缺失不再自动观望 — 留给短期交易型处理
-    if rfs >= 5:
-        return "观望型"
-    if eq == "LOW" and fh == "POOR":
-        return "观望型"
-
-    # ── 长期池: 价值型 / 成长型 / 稳健型 (checked first!) ──
-    # 价值型: good health, reasonable valuation, moderate flags, momentum 50-90
-    if fh == "GOOD" and val not in ("OVERPRICED", "?") and rfs <= 2 and momentum >= mp40:
-        return "价值型"
-
-    # 成长型: high growth OR high earnings quality, reasonable valuation, momentum 55+
-    if (gq == "HIGH" or eq == "HIGH") and val != "OVERPRICED" and rfs <= 1 and momentum >= mp50:
-        return "成长型"
-
-    # 稳健型: not poor health, low-moderate momentum, stable
-    if fh != "POOR" and fh != "?" and momentum >= mp30 and rfs <= 2:
-        return "稳健型"
-
-    # ── 短期池: 动量型 / 突破型 (only for stocks that don't qualify above) ──
-    # 动量型: strong momentum, quality floor (not LOW earnings)
-    if momentum >= mp80 and eq != "LOW":
-        return "动量型"
-
-    # 突破型: moderate MA60 breakout, volume expansion
-    if momentum >= mp60 and eq != "LOW" and rfs <= 3:
-        return "突破型"
-
-    # ── 短期交易型: multi-timeframe momentum positive, fundamentals not terrible ──
     d3 = momentum_d3 or 0; d5 = momentum_d5 or 0; d20 = momentum_d20 or 0
+
+    # ── Hard gate: fundamentally broken → 观望型 only ──
+    if rfs >= 5:
+        return ["观望型"]
+    if eq == "LOW" and fh == "POOR":
+        return ["观望型"]
+
+    tags = set()
+
+    # ── Long-term categories ──
+    # 价值型: good health, reasonable valuation, moderate flags, momentum ≥ p40
+    if fh == "GOOD" and val not in ("OVERPRICED", "?") and rfs <= 2 and momentum >= mp40:
+        tags.add("价值型")
+
+    # 成长型: high growth OR high earnings quality, reasonable valuation, momentum ≥ p50
+    if (gq == "HIGH" or eq == "HIGH") and val != "OVERPRICED" and rfs <= 1 and momentum >= mp50:
+        tags.add("成长型")
+
+    # 稳健型: not poor health, known fh, momentum ≥ p30, rfs ≤ 2
+    if fh != "POOR" and fh != "?" and momentum >= mp30 and rfs <= 2:
+        tags.add("稳健型")
+
+    # ── Hot-picks categories ──
+    # 动量型: strong momentum, quality floor
+    if momentum >= mp80 and eq != "LOW":
+        tags.add("动量型")
+
+    # 突破型: moderate momentum, quality floor
+    if momentum >= mp60 and eq != "LOW" and rfs <= 3:
+        tags.add("突破型")
+
+    # 短期交易型: multi-timeframe momentum positive, fundamentals not terrible
     if d3 > 0 and d5 > 0 and d20 > 0:
         if fund_score >= 30 or not has_a2:
-            return "短期交易型"
+            tags.add("短期交易型")
 
-    # ── Fallback: re-check with relaxed criteria ──
-    if has_a2 and fh != "POOR" and fh != "?" and momentum < mp80:
-        return "稳健型"
-    if has_a2 and momentum >= mp60 and eq != "LOW":
-        return "动量型"
+    # ── Fallbacks if nothing matched ──
+    if not tags:
+        if has_a2 and fh != "POOR" and fh != "?":
+            tags.add("稳健型")
+        elif has_a2 and momentum >= mp60 and eq != "LOW":
+            tags.add("动量型")
+        elif not has_a2 and d3 > 0 and d5 > 0:
+            tags.add("短期交易型")
+        else:
+            tags.add("观望型")
 
-    # ── 短期交易型 fallback: momentum positive, no A2 needed ──
-    if not has_a2 and d3 > 0 and d5 > 0:
-        return "短期交易型"
-
-    return "观望型"
+    return sorted(tags)
 
 
 def rebuild(strategy="long_term"):
@@ -149,17 +155,20 @@ def rebuild(strategy="long_term"):
         p80, p60, p50, p40, p30 = mpct(0.80), mpct(0.60), mpct(0.50), mpct(0.40), mpct(0.30)
         logger.info(f"Focus mom percentiles: p80={p80:.0f} p60={p60:.0f} p50={p50:.0f} p40={p40:.0f} p30={p30:.0f}")
 
-        # ── Classify all stocks ──
+        # ── Classify all stocks (multi-label) ──
         classified = defaultdict(list)
+        stock_tags = {}  # ts_code → list of tags (for dedup & persist)
         for r in rows:
             rd = dict(r)
             a2 = a2_cache.get(rd["ts_code"])
             d3 = rd.get("momentum_d3") or 0
             d5 = rd.get("momentum_d5") or 0
             d20 = rd.get("momentum_d20") or 0
-            cat = classify_stock(rd, a2, momentum_d3=d3, momentum_d5=d5, momentum_d20=d20,
+            tags = classify_stock(rd, a2, momentum_d3=d3, momentum_d5=d5, momentum_d20=d20,
                                 p80=p80, p60=p60, p50=p50, p40=p40, p30=p30)
-            classified[cat].append(rd)
+            stock_tags[rd["ts_code"]] = tags
+            for tag in tags:
+                classified[tag].append(rd)
 
         # ── Log distribution ──
         dist = {k: len(v) for k, v in sorted(classified.items())}
@@ -192,6 +201,7 @@ def rebuild(strategy="long_term"):
             top_pct = 0.50  # hot_picks: fixed, not regime-aware
 
         # Select from each category: percentage-based, no ratio caps
+        seen = set()
         selected = []
         for cat in allowed_types:
             candidates = [r for r in classified.get(cat, [])
@@ -202,33 +212,29 @@ def rebuild(strategy="long_term"):
             min_take = 12 if strategy == "long_term" else 8
             take = max(min_take, int(len(candidates) * top_pct))
             for r in candidates[:take]:
-                selected.append(r)
+                code = r["ts_code"]
+                if code not in seen:
+                    seen.add(code)
+                    selected.append(r)
 
+        # Log: count per category (split multi-label tier strings)
         cat_counts = {}
         for s in selected:
-            c = classify_stock(s, a2_cache.get(s["ts_code"]),
-                              momentum_d3=s.get("momentum_d3") or 0,
-                              momentum_d5=s.get("momentum_d5") or 0,
-                              momentum_d20=s.get("momentum_d20") or 0,
-                              p80=p80, p60=p60, p50=p50, p40=p40, p30=p30)
-            cat_counts[c] = cat_counts.get(c, 0) + 1
+            for tag in stock_tags.get(s["ts_code"], []):
+                cat_counts[tag] = cat_counts.get(tag, 0) + 1
         logger.info(f"Focus list [{strategy}]: {len(selected)} selected {dict(cat_counts)}")
 
         # ── Persist ──
         trade_date = datetime.now().strftime("%Y-%m-%d")
         conn.execute("DELETE FROM focus_list WHERE strategy=?", (strategy,))
         for i, s in enumerate(selected):
-            cat = classify_stock(s, a2_cache.get(s["ts_code"]),
-                                momentum_d3=s.get("momentum_d3") or 0,
-                                momentum_d5=s.get("momentum_d5") or 0,
-                                momentum_d20=s.get("momentum_d20") or 0,
-                                p80=p80, p60=p60, p50=p50, p40=p40, p30=p30)
+            tier = ",".join(stock_tags.get(s["ts_code"], ["观望型"]))
             conn.execute(
                 """INSERT INTO focus_list (ts_code, name, total_score, rank, list_date, position, tier, strategy)
                    VALUES (?,?,?,?,?,?,?,?)""",
                 (s["ts_code"], s["name"],
                  s["total_score"], s["rank"], trade_date, i + 1,
-                 cat, strategy),
+                 tier, strategy),
             )
         conn.commit()
         return selected
