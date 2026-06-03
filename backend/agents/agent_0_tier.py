@@ -273,11 +273,12 @@ def classify_rule_direct(features):
                 "confidence": 0.90,
                 "source": "rule_direct",
             }
-        # Direct AVOID: extreme volatility
-        elif amplitude > 80:
+        # Direct AVOID: extreme volatility NOT explained by directional trend
+        # High amp + small net change = whipsaw/pump-dump. High amp + large net change = strong trend.
+        elif amplitude > 80 and abs(chg_20d) < amplitude * 0.5:
             results[code] = {
                 "tier": TIER_AVOID,
-                "reason": f"20日振幅{amplitude:.0f}%过高(异常波动)",
+                "reason": f"20日振幅{amplitude:.0f}%过高且趋势不足(异常波动)",
                 "confidence": 0.85,
                 "source": "rule_direct",
             }
