@@ -565,19 +565,22 @@ PE={metrics.get('pe_ttm')}  PB={metrics.get('pb')}  PS={metrics.get('ps')}
 
 基于以上数据做分析。以提供的数据为唯一依据，数据中未包含的信息不应假设。如数据中存在矛盾或异常，在相关维度中说明。
 
-1. 盈利特征 (rating: HIGH/MEDIUM/LOW, positive_factors, negative_factors)
+1. 盈利特征 (rating: HIGH/MEDIUM/LOW/UNKNOWN, positive_factors, negative_factors)
    - 从ROE水平及多季度趋势、毛利率变动方向、经营现金流与净利润的匹配程度，描述公司盈利特征
+   - 重要：数据不足(如仅单季度/缺现金流/ROE异常但无法确认原因)时，使用UNKNOWN而非LOW。LOW必须是盈利明确恶化(如多季度利润持续下滑/ROE长期低于行业/经营现金流持续为负)。
 
-2. 增长特征 (rating: HIGH/MEDIUM/LOW, organic_growth_pct, anomaly_notes)
+2. 增长特征 (rating: HIGH/MEDIUM/LOW/UNKNOWN, organic_growth_pct, anomaly_notes)
    - 从多季度营收和利润的变动趋势，描述公司的增长模式
    - 标注数据中的异常波动（例如利润大幅变动而营收基本不变时，描述两者差异及可能的财务原因）
+   - 重要：单季度数据无法判断增长趋势时，使用UNKNOWN。
 
-3. 财务结构 (rating: GOOD/FAIR/POOR, debt_concern, liquidity_concern)
+3. 财务结构 (rating: GOOD/FAIR/POOR/UNKNOWN, debt_concern, liquidity_concern)
    - 从负债率趋势、流动/速动比率的变化方向、净资产的增长或收缩，描述公司的财务结构
+   - 重要：POOR必须是财务结构明确恶化(如负债率>80%且持续上升/速动比率<0.5/净资产持续缩水)。数据不足时使用UNKNOWN。
 
-4. 估值背景 (rating: OVERPRICED/FAIR/UNDERPRICED, reasoning)
+4. 估值背景 (rating: OVERPRICED/FAIR/UNDERPRICED/UNKNOWN, reasoning)
    - 结合增速和盈利水平，描述当前PE/PB/PS所反映的市场估值状态；利润为负时侧重PB/PS
-   - 重要：当PE/PB/PS数据缺失(null)时，基于可用指标做判断，仍无法判断则使用FAIR并注明"估值数据不足"
+   - 重要：PE/PB/PS全部缺失且无替代指标时，使用UNKNOWN并注明"关键估值数据缺失"
 
 5. 红旗核验 — 逐一核对程序检测的风险信号：数据支持则确认，数据不支持则驳回，同时可补充数据中发现的其他风险信号
 
@@ -592,17 +595,17 @@ PE={metrics.get('pe_ttm')}  PB={metrics.get('pb')}  PS={metrics.get('ps')}
 9. 综合描述 — 200-500字，基于以上各维度分析，形成对该公司的整体描述
 
 输出JSON：
-{{"earnings_quality":{{"rating":"HIGH/MEDIUM/LOW","positive_factors":["..."],"negative_factors":["..."]}},"growth_quality":{{"rating":"HIGH/MEDIUM/LOW","organic_growth_pct":null,"anomaly_notes":["..."]}},"financial_health":{{"rating":"GOOD/FAIR/POOR","debt_concern":false,"liquidity_concern":false}},"valuation":{{"rating":"OVERPRICED/FAIR/UNDERPRICED","reasoning":"..."}},"red_flags":[{{"severity":"HIGH/MEDIUM/LOW","flag":"...","detail":"..."}}],"blind_spots":["..."],"marginal_change":"最近季度改善/恶化信号","short_term_notes":"短期关注点","narrative":"...","confidence":0.0-1.0}}"""
+{{"earnings_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","positive_factors":["..."],"negative_factors":["..."]}},"growth_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","organic_growth_pct":null,"anomaly_notes":["..."]}},"financial_health":{{"rating":"GOOD/FAIR/POOR/UNKNOWN","debt_concern":false,"liquidity_concern":false}},"valuation":{{"rating":"OVERPRICED/FAIR/UNDERPRICED/UNKNOWN","reasoning":"..."}},"red_flags":[{{"severity":"HIGH/MEDIUM/LOW","flag":"...","detail":"..."}}],"blind_spots":["..."],"marginal_change":"最近季度改善/恶化信号","short_term_notes":"短期关注点","narrative":"...","confidence":0.0-1.0}}"""
     result = llm.chat_json(prompt, model=cfg["model"], max_tokens=cfg["max_tokens"],
                            temperature=cfg.get("temperature", 0.3))
 
     # ── Sanitize ratings to valid enum values (safety net for LLM deviations) ──
     if result:
         VALID_RATINGS = {
-            "earnings_quality": ("HIGH", "MEDIUM", "LOW"),
-            "growth_quality": ("HIGH", "MEDIUM", "LOW"),
-            "financial_health": ("GOOD", "FAIR", "POOR"),
-            "valuation": ("OVERPRICED", "FAIR", "UNDERPRICED"),
+            "earnings_quality": ("HIGH", "MEDIUM", "LOW", "UNKNOWN"),
+            "growth_quality": ("HIGH", "MEDIUM", "LOW", "UNKNOWN"),
+            "financial_health": ("GOOD", "FAIR", "POOR", "UNKNOWN"),
+            "valuation": ("OVERPRICED", "FAIR", "UNDERPRICED", "UNKNOWN"),
         }
         for section, valid in VALID_RATINGS.items():
             obj = result.get(section)
