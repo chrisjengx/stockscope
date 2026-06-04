@@ -14,7 +14,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.expanduser("~/stock-analysis"))
 from backend.data.schema import get_connection
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [FETCH] %(message)s")
 logger = logging.getLogger("data_fetcher")
 
 

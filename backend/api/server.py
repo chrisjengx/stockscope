@@ -793,6 +793,20 @@ def serve_static(path):
 import threading
 
 _scheduler_running = False
+_task_last_run: dict[str, float] = {}  # in-memory guard: prevents re-trigger in same window
+
+
+def _should_trigger(key: str, cooldown_sec: int = 240) -> bool:
+    """Return True if key hasn't been triggered within cooldown_sec.
+
+    In-memory only — resets on restart, so restarted servers never miss a scheduled window.
+    """
+    now = time.time()
+    last = _task_last_run.get(key, 0)
+    if now - last > cooldown_sec:
+        _task_last_run[key] = now
+        return True
+    return False
 
 
 def _scheduler_loop():
@@ -809,8 +823,8 @@ def _scheduler_loop():
     """
     global _scheduler_running
     _scheduler_running = True
-    logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:05, "
-                "data@16:30(full), A0@19:00(Mon-Sat), pipeline2@19:25, A2 start@20:00")
+    logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:00, "
+                "data@16:30(full), A0@18:00(Mon-Sat), pipeline2@18:45, A2 start@20:00")
 
     while _scheduler_running:
         now = datetime.now()
@@ -818,8 +832,6 @@ def _scheduler_loop():
         weekday = now.weekday()
         hour = now.hour
         minute = now.minute
-
-        last = _get_last_runs()
 
         # ── Pipeline watchdog: abort stuck pipelines (>45 min) ──
         try:
@@ -834,25 +846,23 @@ def _scheduler_loop():
             pass
 
         # ── 08:30: Stop A2 Worker (graceful — finish current stock) ──
-        if hour == 8 and minute >= 30 and minute < 35 and last.get("a2_stop") != today:
+        if hour == 8 and minute >= 30 and minute < 35 and _should_trigger("a2_stop", 300):
             global _a2_worker_active
             if _a2_worker_active:
                 logger.info("Scheduler: 08:30 stopping A2 Worker (graceful shutdown)")
                 _a2_worker_active = False
-            _set_last_run("a2_stop", today)
 
         # ── Data fetch: 13:15 (targeted: HOLDING+FAVORED+NEUTRAL only) ──
-        if hour == 13 and minute >= 15 and minute < 20 and last.get("data_fetch_13") != today:
+        if hour == 13 and minute >= 15 and minute < 20 and _should_trigger("data_fetch_13", 300):
             logger.info("Scheduler: 13:15 data fetch (targeted: HOLDING+FAVORED+NEUTRAL)")
             try:
                 from backend.data.fetcher import daily_update
                 threading.Thread(target=daily_update, kwargs={"target_tiers": ["HOLDING", "FAVORED", "NEUTRAL"]}, daemon=True).start()
-                _set_last_run("data_fetch_13", today)
             except Exception as e:
                 logger.error(f"Scheduler data fetch 13:15 failed: {e}")
 
-        # ── Pipeline + HTML report: 14:05 ──
-        if hour == 14 and minute >= 5 and minute < 10 and last.get("pipeline_14") != today:
+        # ── Pipeline + HTML report: 14:00 ──
+        if hour == 14 and minute >= 0 and minute < 5 and _should_trigger("pipeline_14"):
             logger.info("Scheduler: 14:05 pipeline both + HTML report")
             try:
                 from backend.orchestrator import get_orchestrator
@@ -867,33 +877,30 @@ def _scheduler_loop():
                     except Exception as e:
                         logger.error(f"HTML report failed: {e}")
                 threading.Thread(target=_run_and_report, daemon=True).start()
-                _set_last_run("pipeline_14", today)
             except Exception as e:
-                logger.error(f"Scheduler pipeline 14:15 failed: {e}")
+                logger.error(f"Scheduler pipeline 14:05 failed: {e}")
 
         # ── Data fetch: 16:30 (closing data) ──
-        if hour == 16 and minute >= 30 and minute < 35 and last.get("data_fetch_16") != today:
+        if hour == 16 and minute >= 30 and minute < 35 and _should_trigger("data_fetch_16", 300):
             logger.info("Scheduler: 16:30 data fetch (closing, async)")
             try:
                 from backend.data.fetcher import daily_update
                 threading.Thread(target=daily_update, daemon=True).start()
-                _set_last_run("data_fetch_16", today)
             except Exception as e:
                 logger.error(f"Scheduler data fetch 16:30 failed: {e}")
 
-        # ── 19:00: A0 Gate daily (Mon-Sat only) ──
-        if weekday != 6 and hour == 19 and minute >= 0 and minute < 5 and last.get("a0_daily") != today:
-            logger.info("Scheduler: 19:00 A0 Gate daily (Mon-Sat)")
+        # ── 18:00: A0 Gate daily (Mon-Sat only) ──
+        if weekday != 6 and hour == 18 and minute >= 0 and minute < 5 and _should_trigger("a0_daily", 300):
+            logger.info("Scheduler: 21:00 A0 Gate daily (Mon-Sat)")
             try:
                 from backend.agents.agent_0_tier import run as a0_run
                 threading.Thread(target=a0_run, kwargs={"mode": "weekly"}, daemon=True).start()
-                _set_last_run("a0_daily", today)
             except Exception as e:
-                logger.error(f"Scheduler A0 18:00 failed: {e}")
+                logger.error(f"Scheduler A0 21:00 failed: {e}")
 
-        # ── Pipeline #2: 19:25 daily ──
-        if hour == 19 and minute >= 25 and minute < 30 and last.get("pipeline_19") != today:
-            logger.info("Scheduler: 19:25 pipeline both + HTML report (2nd run)")
+        # ── Pipeline #2: 18:45 daily ──
+        if hour == 18 and minute >= 45 and minute < 50 and _should_trigger("pipeline_18"):
+            logger.info("Scheduler: 22:00 pipeline both + HTML report (2nd run)")
             try:
                 from backend.orchestrator import get_orchestrator
                 orch = get_orchestrator()
@@ -907,12 +914,11 @@ def _scheduler_loop():
                     except Exception as e:
                         logger.error(f"HTML report failed: {e}")
                 threading.Thread(target=_run_and_report, daemon=True).start()
-                _set_last_run("pipeline_19", today)
             except Exception as e:
-                logger.error(f"Scheduler pipeline 19:00 failed: {e}")
+                logger.error(f"Scheduler pipeline 22:00 failed: {e}")
 
         # ── 20:00: Start A2 Worker ──
-        if hour == 20 and minute >= 0 and minute < 5 and last.get("a2_start") != today:
+        if hour == 20 and minute >= 0 and minute < 5 and _should_trigger("a2_start", 300):
             logger.info("Scheduler: 20:00 starting A2 Worker (night window)")
             try:
                 from backend.data.schema import get_connection as gc
@@ -926,36 +932,11 @@ def _scheduler_loop():
                 logger.info(f"A2 refresh: {stale} stocks need updates, starting worker")
                 if not _a2_worker_active:
                     start_a2_worker()
-                _set_last_run("a2_start", today)
             except Exception as e:
                 logger.error(f"Scheduler A2 start failed: {e}")
 
         time.sleep(60)
 
-
-def _get_last_runs() -> dict:
-    """Read last run timestamps from DB."""
-    try:
-        conn = get_connection()
-        rows = conn.execute("SELECT run_key, last_run FROM scheduler_state").fetchall()
-        conn.close()
-        return {r["run_key"]: r["last_run"] for r in rows}
-    except Exception:
-        return {}
-
-
-def _set_last_run(key: str, value: str):
-    """Persist last run timestamp to DB."""
-    try:
-        conn = get_connection()
-        conn.execute(
-            "INSERT OR REPLACE INTO scheduler_state (run_key, last_run) VALUES (?,?)",
-            (key, value),
-        )
-        conn.commit()
-        conn.close()
-    except Exception:
-        pass
 
 
 def start_scheduler():
@@ -964,7 +945,7 @@ def start_scheduler():
 
 
 # ═══════════════════════════════════════════════════════════════
-# A2 Night Worker — runs 20:00–08:30, independent of pipeline
+# A2 Night Worker — runs 21:00–08:30, independent of pipeline
 # ═══════════════════════════════════════════════════════════════
 
 _a2_worker_active = False
