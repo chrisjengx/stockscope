@@ -900,7 +900,7 @@ def _scheduler_loop():
 
         # ── Pipeline #2: 18:45 daily ──
         if hour == 18 and minute >= 45 and minute < 50 and _should_trigger("pipeline_18"):
-            logger.info("Scheduler: 22:00 pipeline both + HTML report (2nd run)")
+            logger.info("Scheduler: 18:45 pipeline both + HTML report (2nd run)")
             try:
                 from backend.orchestrator import get_orchestrator
                 orch = get_orchestrator()
