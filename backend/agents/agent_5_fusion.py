@@ -548,10 +548,10 @@ def fusion_synthesis(top_n, macro_report, macro_regime, strategy,
         d20 = m_raw.get("d20", 0)
         d60 = m_raw.get("d60", 0)
 
-        if accel > 3: stage = "ACCEL"
-        elif accel > 0: stage = "SUSTAIN"
-        elif accel > -3: stage = "DECEL"
-        else: stage = "REVERSE"
+        if accel > 3: stage = "ACCELERATING"
+        elif accel > 0: stage = "SUSTAINING"
+        elif accel > -3: stage = "DECELERATING"
+        else: stage = "REVERSING"
 
         lines.append(
             f"{i:2d}. {code} [{tt}/{stage}] 总分:{score:.0f} [T:{ts:.0f} F:{fs:.0f}] | "

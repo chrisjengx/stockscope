@@ -56,11 +56,10 @@ def classify_stock(r, a2_report=None, momentum_d3=None, momentum_d5=None, moment
 
     d3 = momentum_d3 or 0; d5 = momentum_d5 or 0; d20 = momentum_d20 or 0
 
-    # ── Hard gate: fundamentally broken → 观望型 only ──
+    # ── Hard gate: too many red flags → 观望型 only ──
     if rfs >= 5:
         return ["观望型"]
-    if eq == "LOW" and fh == "POOR":
-        return ["观望型"]
+    # eq=LOW+fh=POOR no longer hard-gated — A7 LLM has discretion to include with rationale
 
     tags = set()
 
@@ -181,24 +180,24 @@ def rebuild(strategy="long_term"):
         else:
             allowed_types = {"价值型", "成长型", "稳健型"}
 
-        # Per-strategy TOP_PCT: long_term regime-aware, hot_picks fixed
+        # Per-strategy TOP_PCT: regime-aware, strategy-differentiated base
         if strategy == "long_term":
             base_pct = 0.30
-            try:
-                mr = conn.execute(
-                    "SELECT regime FROM macro_regime ORDER BY calc_date DESC LIMIT 1"
-                ).fetchone()
-                regime = mr["regime"] if mr else ""
-                if "熊市" in str(regime) or "BEAR" in str(regime).upper():
-                    top_pct = base_pct * 0.55  # BEAR: ~16.5%
-                elif "牛市" in str(regime) or "BULL" in str(regime).upper():
-                    top_pct = base_pct  # BULL: 30%
-                else:
-                    top_pct = base_pct * 0.80  # NEUTRAL: 24%
-            except Exception:
-                top_pct = base_pct
         else:
-            top_pct = 0.50  # hot_picks: fixed, not regime-aware
+            base_pct = 0.40
+        try:
+            mr = conn.execute(
+                "SELECT regime FROM macro_regime ORDER BY calc_date DESC LIMIT 1"
+            ).fetchone()
+            regime = mr["regime"] if mr else ""
+            if "熊市" in str(regime) or "BEAR" in str(regime).upper():
+                top_pct = base_pct * 0.60  # BEAR: tighter
+            elif "牛市" in str(regime) or "BULL" in str(regime).upper():
+                top_pct = base_pct * 1.00  # BULL: full base
+            else:
+                top_pct = base_pct * 0.80  # NEUTRAL: moderate
+        except Exception:
+            top_pct = base_pct
 
         # Select from each category: percentage-based, no ratio caps
         seen = set()

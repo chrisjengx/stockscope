@@ -55,9 +55,9 @@ def compute_conviction(code, a5_scores, a2_report, fusion_fragility, macro_regim
     a2_conf = a2_report.get("confidence", 0) if a2_report else 0
     a2_factor = 0.4 + 0.6 * a2_conf
 
-    # Fragility from A5 fusion analysis (reduced weight: 20% → 10%)
+    # Fragility from A5 fusion analysis
     fragility_map = {
-        "STABLE": 1.0, "MEDIUM": 0.8, "SINGLE_FACTOR": 0.6,
+        "STABLE": 1.0, "MEDIUM": 0.7, "REVERSING": 0.7,
         "HIGH": 0.5, "NO_DATA": 0.5,
     }
     fragility = fragility_map.get(fusion_fragility, 0.5) if fusion_fragility else 0.5
@@ -229,7 +229,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     fusion_narrative = str(fusion_report.get("overall_narrative", "无"))[:200] if fusion_report else "无"
 
 
-    # ── Percentage-based inclusion boundary, unified 8-15% ──
+    # ── Percentage-based inclusion boundary, 7-20% per batch ──
     include_pct = 0.125 if strategy == "hot_picks" else 0.10
     max_include = max(5, int(len(candidates) * include_pct))
 
@@ -242,7 +242,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             "不关心长期价值——只关心未来几天能不能涨。",
             "",
             "选股优先级: 动量强度 > 量价配合 > 基本面(仅查硬伤)",
-            "硬伤: fh=POOR且eq=LOW → 必须REJECT。其余基本面瑕疵(ROE低/负债高/估值高/数据缺失)不重要。",
+            "硬伤: fh=POOR且eq=LOW → 建议REJECT(LLM可酌情纳入,需明确反驳理由)。其余基本面瑕疵(ROE低/负债高/估值高/数据缺失)不重要。",
             "",
             "对每只候选股回答: 1.动量够不够强? 2.什么情况下判断错误? 3.3-5天内空间够不够?",
         ]
@@ -277,7 +277,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         ),
         "",
         "通用:",
-        "- 正acc+负d5 = 下跌减速, 不是反转! 只有d3>0且d5>0且acc>0才是真正向上反转。",
+        "- 反转判断: d3>0且acc>0 = 短期势头已转向上。",
         "- 不要凑数, 也不强制压缩。按标准来。",
         "",
         f"权重指引 (最低{cfg['min_single_weight']:.0%}, 最高{cfg['max_single_weight']:.0%}): 所有纳入必须≥{cfg['min_single_weight']:.0%}, 否则自动裁掉.",
@@ -290,7 +290,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         "ACCELERATING（加速初期）= 最佳窗口，积极配置",
         "SUSTAINING（持续中）= 可参与，适度配置",
         "DECELERATING（减速中）= 降权重但不一定拒绝",
-        "REVERSING（反转中）= 回避",
+        "REVERSING（反转中）= 建议回避，可参与但需谨慎",
         "",
         "=== 上下文 ===",
         f"当前宏观: {regime_str} | 策略: {strategy}",
@@ -329,11 +329,11 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     # ── Footer template (per-batch values filled in loop) ──
     def build_footer(batch_size):
         n_min = max(1, int(batch_size * 0.07))
-        n_max = max(1, int(batch_size * 0.15))
+        n_max = max(1, int(batch_size * 0.20))
         return [
             "",
             f"=== 本批次选择指引 ({batch_size}只) ===",
-            f"从以上列出的{batch_size}只候选股中, 按7-15%比例选出{n_min}~{n_max}只纳入(至少1只)。",
+            f"从以上列出的{batch_size}只候选股中, 按7-20%比例选出{n_min}~{n_max}只纳入(至少1只)。",
             f"其余输出REJECT。每只都要有决策——遗漏自动视为REJECT。",
             "",
             "输出JSON (rationale和risk_boundary均不超过180字):",
@@ -593,11 +593,13 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             for ts in fusion_report.get("trend_stages", []):
                 if isinstance(ts, dict):
                     stage = ts.get("stage", "")
-                    # Map ACCELERATING/SUSTAINING → STABLE, DECELERATING → MEDIUM, REVERSING → HIGH
+                    # Map trend stage to fragility tier
                     if stage in ("ACCELERATING", "SUSTAINING"):
                         fusion_fragility[ts.get("ts_code", "")] = "STABLE"
                     elif stage == "DECELERATING":
                         fusion_fragility[ts.get("ts_code", "")] = "MEDIUM"
+                    elif stage == "REVERSING":
+                        fusion_fragility[ts.get("ts_code", "")] = "REVERSING"
                     else:
                         fusion_fragility[ts.get("ts_code", "")] = "HIGH"
             # Fallback: old format factor_attribution
@@ -801,7 +803,7 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
         else:
             # Fallback: mechanical — top by conviction, percentage-driven
             logger.warning("LLM unavailable — using mechanical fallback")
-            top_n = max(5, int(len(candidates) * 0.15))
+            top_n = max(5, int(len(candidates) * 0.20))
             sorted_cands = sorted(candidates, key=lambda c: -c["conviction"])
             for i, cand in enumerate(sorted_cands):
                 if i < top_n:
@@ -814,7 +816,7 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                     a7_decisions[cand["ts_code"]] = {
                         "a7_recommendation": "REJECT",
                         "weight": 0,
-                        "rationale": f"机械fallback: 确信度#{i+1}/{len(candidates)}, 超出top 15%",
+                        "rationale": f"机械fallback: 确信度#{i+1}/{len(candidates)}, 超出top 20%",
                     }
 
         # ── Build final_portfolio from A7 decisions (shared by LLM and fallback) ──

@@ -30,10 +30,10 @@ A0(排除) → A1(Tech)+A4(Macro)∥A3(News) → A5(Fusion) → FL(Classify) →
 |------|-------|
 | 08:30 | A2 Worker stop |
 | 13:15 | Data fetch (HOLDING+FAVORED+NEUTRAL) |
-| 14:05 | Pipeline + HTML report |
+| 14:00 | Pipeline #1 + HTML report |
 | 16:30 | Data fetch (full close) |
 | 18:00 | A0 Gate (Mon-Sat) |
-| 19:00 | Pipeline #2 + HTML report |
+| 18:45 | Pipeline #2 + HTML report |
 | 20:00 | A2 Worker start |
 
 ## Commands
