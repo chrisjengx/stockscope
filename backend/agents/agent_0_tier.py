@@ -314,13 +314,15 @@ def classify_llm(conn, codes, features):
             "分类标准：",
             f"  {TIER_FAVORED} — 趋势向好，技术面积极，值得深入分析",
             f"  {TIER_NEUTRAL} — 方向不明，信号矛盾，观望为主",
-            f"  {TIER_AVOID}   — 趋势走弱，技术面恶化，不建议投入分析资源",
+            f"  {TIER_AVOID}   — 趋势明确且持续恶化。极其谨慎使用：一旦标记AVOID，该股票将永久失去后续分析机会。",
+            f"                 不确定时倾向NEUTRAL——宁可放过，不可误杀。",
             "",
             "分析维度：",
             "  - 价格与MA60偏离程度 + 趋势结构（MA多头/空头排列）",
             "  - 量价匹配程度：标注价格与成交量方向不一致的情况",
             "  - 20日 vs 60日动量对比：短期与中期趋势是否一致",
             "  - 对信号矛盾的股票（如价格强但量弱），倾向于NEUTRAL并说明原因",
+            "  - 只有多维度一致指向趋势恶化（如MA空头+量价背离+动量全负），才考虑AVOID",
             "",
             "=== 股票数据 ===",
             f"{'代码':<12s} {'价格':>8s} {'vsMA60':>7s} {'MA排列':<8s} {'量价':<10s} {'20日':>7s} {'30日':>7s} {'60日':>7s} {'振幅':>6s} {'规模':<4s}",
@@ -470,15 +472,9 @@ def run(strategy="long_term", trade_date=None, mode="weekly"):
     try:
         all_codes = [r["ts_code"] for r in conn.execute("SELECT ts_code FROM stocks").fetchall()]
 
-        # Cold start vs warm run
-        prev_count = conn.execute("SELECT COUNT(*) FROM tier_assignments").fetchone()[0]
-        is_cold_start = prev_count == 0
-        if is_cold_start:
-            target_codes = all_codes
-            logger.info(f"COLD START: classifying all {len(all_codes)} stocks")
-        else:
-            target_codes = _find_changed_codes(conn, all_codes, trade_date)
-            logger.info(f"WARM RUN: {len(target_codes)}/{len(all_codes)} stocks need re-classification")
+        # Full classification every run — incremental warm runs missed too many changes
+        target_codes = all_codes
+        logger.info(f"Classifying all {len(all_codes)} stocks")
 
         # Step 1: Hard exclusions (pure rules)
         excluded = check_excluded(conn, trade_date)
@@ -533,8 +529,7 @@ def run(strategy="long_term", trade_date=None, mode="weekly"):
         dist[TIER_HOLDING] = len(holdings)
 
         summary = (f"{strategy}: EXCLUDED:{dist[TIER_EXCLUDED]} HOLDING:{dist[TIER_HOLDING]} "
-                   f"FAVORED:{dist[TIER_FAVORED]} NEUTRAL:{dist[TIER_NEUTRAL]} AVOID:{dist[TIER_AVOID]} "
-                   f"{'COLD' if is_cold_start else 'WARM'}")
+                   f"FAVORED:{dist[TIER_FAVORED]} NEUTRAL:{dist[TIER_NEUTRAL]} AVOID:{dist[TIER_AVOID]}")
         logger.info(f"Agent 0 complete: {summary} in {elapsed:.1f}s")
 
         conn.execute(
@@ -555,43 +550,6 @@ def run(strategy="long_term", trade_date=None, mode="weekly"):
         raise
     finally:
         conn.close()
-
-
-def _find_changed_codes(conn, all_codes, trade_date):
-    """Find stocks that need re-classification in warm run."""
-    prev = {r["ts_code"]: r["tier"] for r in conn.execute(
-        "SELECT ts_code, tier FROM tier_assignments "
-        "WHERE updated_at = (SELECT MAX(updated_at) FROM tier_assignments)"
-    ).fetchall()}
-
-    changed = set()
-    # New listings
-    for c in all_codes:
-        if c not in prev:
-            changed.add(c)
-
-    # Price crossed MA60
-    for code in prev:
-        rows = conn.execute(
-            "SELECT close FROM daily_quotes WHERE ts_code=? ORDER BY trade_date DESC LIMIT 60",
-            (code,),
-        ).fetchall()
-        if len(rows) >= 60:
-            closes = [r["close"] for r in rows]
-            ma60 = sum(closes[:60]) / 60
-            latest = closes[0]
-            prev_close = closes[1] if len(closes) > 1 else latest
-            if (prev_close < ma60 <= latest) or (prev_close > ma60 >= latest):
-                changed.add(code)
-
-    # Not updated for > 20 trading days
-    for r in conn.execute(
-        "SELECT ts_code FROM tier_assignments WHERE updated_at < date(?, '-20 days')",
-        (trade_date,),
-    ).fetchall():
-        changed.add(r["ts_code"])
-
-    return list(changed)
 
 
 if __name__ == "__main__":
