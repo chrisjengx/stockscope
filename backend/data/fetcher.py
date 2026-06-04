@@ -138,17 +138,15 @@ def daily_update(target_tiers=None, max_workers=1):
 
     start = time.time()
     trade_date = datetime.now().strftime("%Y-%m-%d")
+    default_start = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
-    # Smart date range: from last data date to today (handles weekends/holidays)
+    # Per-stock last trade date for hole-filling (not global MAX — catches per-stock gaps)
     conn = get_connection()
-    last_date = conn.execute("SELECT MAX(trade_date) FROM daily_quotes").fetchone()[0]
-    conn.close()
-    if last_date:
-        start_date = last_date  # fetch from last data point
-    else:
-        start_date = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
-
-    conn = get_connection()
+    stock_last = {}
+    for r in conn.execute(
+        "SELECT ts_code, MAX(trade_date) as last_date FROM daily_quotes GROUP BY ts_code"
+    ).fetchall():
+        stock_last[r["ts_code"]] = r["last_date"]
 
     # Get target stocks: specific tiers or ALL stocks
     if target_tiers:
@@ -169,7 +167,7 @@ def daily_update(target_tiers=None, max_workers=1):
         logger.warning("No stocks found!")
         return 0
 
-    logger.info(f"=== Daily OHLCV update: {start_date} → {trade_date} ({tier_label}, {len(codes)} stocks) ===")
+    logger.info(f"=== Daily OHLCV update: per-stock → {trade_date} ({tier_label}, {len(codes)} stocks) ===")
 
     logger.info(f"Fetching daily data for {len(codes)} stocks (dual-source, sequential)...")
 
@@ -185,14 +183,16 @@ def daily_update(target_tiers=None, max_workers=1):
         pass
 
     total_rows = 0
+    stocks_today = 0
     ak_ok = 0
     bs_ok_count = 0
     conn = get_connection()
     for i, code in enumerate(codes):
         try:
-            # Fetch from BOTH sources
-            _, df_ak = fetch_one_daily(code, start_date, trade_date)
-            _, df_bs = (fetch_daily_baostock(code, start_date, trade_date) if bs_ok else (code, None))
+            # Per-stock start date: fill individual gaps, not just global latest
+            stock_start = stock_last.get(code, default_start)
+            _, df_ak = fetch_one_daily(code, stock_start, trade_date)
+            _, df_bs = (fetch_daily_baostock(code, stock_start, trade_date) if bs_ok else (code, None))
             df = merge_daily_data(df_ak, df_bs)
             if df is not None and not df.empty:
                 rows = save_daily_data(code, df, conn)
@@ -201,6 +201,9 @@ def daily_update(target_tiers=None, max_workers=1):
                     ak_ok += 1
                 if df_bs is not None and not df_bs.empty:
                     bs_ok_count += 1
+                # Check if today's date was actually covered
+                if df["date"].str[:10].eq(trade_date).any() and rows > 0:
+                    stocks_today += 1
         except Exception as e:
             logger.debug(f"{code}: {e}")
         if (i + 1) % 100 == 0:
@@ -208,14 +211,14 @@ def daily_update(target_tiers=None, max_workers=1):
             elapsed = time.time() - start
             rate = (i + 1) / elapsed if elapsed > 0 else 0
             eta = (len(codes) - i - 1) / rate if rate > 0 else 0
-            logger.info(f"  {i+1}/{len(codes)} stocks, {total_rows} rows ({rate:.1f}/s, ETA {eta/60:.0f}min)")
+            logger.info(f"  {i+1}/{len(codes)} stocks, {stocks_today} today | {total_rows} rows ({rate:.1f}/s, ETA {eta/60:.0f}min)")
 
     conn.commit()
     conn.close()
     elapsed = time.time() - start
-    logger.info(f"Daily update complete: {total_rows} rows for {len(codes)} stocks "
-               f"(akshare:{ak_ok} baostock:{bs_ok_count}) in {elapsed:.0f}s")
-    return total_rows
+    logger.info(f"Daily update complete: {stocks_today}/{len(codes)} stocks ({trade_date}) "
+               f"+ {total_rows} total rows (akshare:{ak_ok} baostock:{bs_ok_count}) in {elapsed:.0f}s")
+    return stocks_today
 
 
 def cold_start(tiers=None):
