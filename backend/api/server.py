@@ -796,7 +796,7 @@ _scheduler_running = False
 _task_last_run: dict[str, float] = {}  # in-memory guard: prevents re-trigger in same window
 
 
-def _should_trigger(key: str, cooldown_sec: int = 240) -> bool:
+def _should_trigger(key: str, cooldown_sec: int = 300) -> bool:
     """Return True if key hasn't been triggered within cooldown_sec.
 
     In-memory only — resets on restart, so restarted servers never miss a scheduled window.

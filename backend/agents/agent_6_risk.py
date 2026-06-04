@@ -264,6 +264,15 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
     else:
         budget_hint = "A2数据覆盖充分。"
 
+    # ── Pre-compute rule-based risk flags per stock (inject as hard context) ──
+    rule_flags = {}
+    for d in decisions:
+        code = d["ts_code"]
+        checks = rule_based_checks(d, holdings, conn, a5_scores, fund_reports)
+        reds = [c["detail"] for c in checks if c["severity"] == "RED"]
+        ambers = [c["detail"] for c in checks if c["severity"] == "AMBER"]
+        rule_flags[code] = (reds, ambers)
+
     # ── Per-batch LLM call ──
     A6_BATCH_SIZE = 15  # matches A7, pro model
     all_parsed = []
@@ -304,6 +313,13 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
             batch_lines.append(f"  A7: {a7_rec}{a7_weight_str} (确信度{a7.get('conviction','?')}) — {a7.get('rationale','无')[:120]}")
             if n:
                 batch_lines.append(f"  新闻: {'; '.join(n[:2])}")
+            # Hard risk flags from rule-based checks — LLM must address these
+            reds, ambers = rule_flags.get(code, ([], []))
+            if reds or ambers:
+                flags = []
+                if reds: flags.append(f"RED: {'; '.join(reds)}")
+                if ambers: flags.append(f"AMBER: {'; '.join(ambers)}")
+                batch_lines.append(f"  ⚠ 规则检测: {' | '.join(flags)}")
 
         # A4 systemic risk + sector context
         risk_alerts = macro_report.get("risk_alerts", [])
@@ -321,27 +337,41 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
                 f"{a7_portfolio.get('portfolio_narrative','')[:200]}"
             )
 
+        # Strategy-specific scoring rubric
+        if strategy == "hot_picks":
+            score_rubric = [
+                "风险评分(1-5) — hot_picks动量标的, 波动大, 评分应从严:",
+                "  1=数据齐全+趋势加速+无红旗+无规则警告 → 极罕见, 需明确举证",
+                "  2=趋势健康, 个别维度有疑虑但动量可合理解释 → 需说明理由",
+                "  3=存在明确风险信号(规则AMBER/RED/基本面恶化/动量透支) → 默认给3",
+                "  4=多维度风险叠加或规则RED → 建议VETO",
+                "  5=致命风险(低流动性/基本面崩溃/动量逆转) → 强制VETO",
+            ]
+        else:
+            score_rubric = [
+                "风险评分(1-5):",
+                "  1=无可见风险信号,数据一致,趋势健康,各维度无隐患",
+                "  2=A7判断合理,个别维度有轻微疑虑但不影响大局",
+                "  3=存在需要关注的风险(单一维度明显偏弱/红旗未完全消化/行业逆风)",
+                "  4=显著风险(多维度偏弱/逻辑矛盾/基本面恶化)",
+                "  5=致命风险(低流动性/极高估值无增长/多HIGH红旗/动量崩溃)",
+            ]
+
         # Role + output format footer
         batch_lines += [
             "", a7_hint, budget_hint, "",
             "=== 你的角色 ===",
-            "你是风险标注师。分析每只推荐的风险特征，帮用户做更明智的决策。",
-            "你不是决策者，你是信息提供者。",
+            "你是对抗性风险审查官。你的任务不是确认A7的判断，而是找出被忽略或低估的风险。",
+            "如果一只股票有规则警告(⚠标注)但A7仍然推荐BUY，你必须解释为什么这些警告不影响风险判断。",
+            "默认心态: 倾向给更高风险分——不确定时向上取整(3而非2, 4而非3)。",
             "",
-            "风险评分: 1-2低风险, 3中等风险, 4-5高风险",
-            "",
-            "评分锚:",
-            "  1=无可见风险信号,数据一致,趋势健康,各维度无隐患",
-            "  2=A7判断合理,个别维度有轻微疑虑但不影响大局",
-            "  3=存在需要关注的风险(单一维度明显偏弱/红旗未完全消化/行业逆风)",
-            "  4=显著风险(多维度偏弱/逻辑矛盾/基本面恶化),建议VETO",
-            "  5=致命风险(低流动性/极高估值无增长/多HIGH红旗/动量崩溃),强制VETO",
+            *score_rubric,
             "",
             "必须为每只待审股输出一条review——万一遗漏将使用规则兜底审查:",
             "输出JSON:",
             '{"reviews": [{"ts_code":"...","risk_score":1-5,',
             '"recommendation":"PREFER/CAUTION/AVOID",',
-            '"reasoning":"具体风险分析",',
+            '"reasoning":"具体风险分析,必须回应⚠标记",',
             '"risk_dimensions":["..."],"conditions":["..."],"confidence":0.0-1.0}],',
             '"cash_assessment":"...",',
             '"portfolio_notes":"..."}',
@@ -450,7 +480,7 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
 def _apply_adversarial_verdicts(decisions, scores):
     """Layer 3: ranking-based adversarial elimination.
 
-    - BUY: sort by risk_score → top 60% APPROVED (floor 5, ceiling 15)
+    - BUY: sort by risk_score → top 60% APPROVED (floor 3, ceiling 12)
       - risk_score >= 4 → forced VETOED regardless of rank
     - SELL/HOLD/REDUCE: all APPROVED (don't block risk management)
     """
@@ -459,7 +489,7 @@ def _apply_adversarial_verdicts(decisions, scores):
 
     buys.sort(key=lambda x: x[1].get("risk_score", 3))
     n = len(buys)
-    cutoff = max(min(2, n), min(15, int(n * 0.6)))  # floor min(2,n), ceiling 15 — small portfolios still get adversarial pressure
+    cutoff = max(min(3, n), min(12, int(n * 0.6)))  # floor min(3,n), ceiling 12
 
     for i, (d, s) in enumerate(buys):
         risk = s.get("risk_score", 3)
