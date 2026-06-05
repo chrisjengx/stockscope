@@ -243,8 +243,9 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             "",
             "选股优先级: 动量强度 > 量价配合 > 基本面(仅查硬伤)",
             "硬伤: fh=POOR且eq=LOW → 建议REJECT(LLM可酌情纳入,需明确反驳理由)。其余基本面瑕疵(ROE低/负债高/估值高/数据缺失)不重要。",
+            "量比>1.5=放量(资金关注), <0.7=缩量(无人气)。价涨量缩=警惕, 价涨量增=健康。OBV与价格方向背离=信号矛盾。",
             "",
-            "对每只候选股回答: 1.动量够不够强? 2.什么情况下判断错误? 3.3-5天内空间够不够?",
+            "对每只候选股回答: 1.动量够不够强? 2.量价配合是否健康? 3.3-5天内空间够不够?",
         ]
     else:
         role_lines = [
@@ -381,7 +382,18 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
                 batch_lines.append(f"    A2: 盈{a2.get('eq','?')} 财{a2.get('fh','?')} 估{a2.get('val','?')} | 红旗:{a2.get('rfs',[]) or '无'} | 置信:{a2.get('conf',0):.0%}")
             else:
                 batch_lines.append(f"    A2: 缺失")
-            batch_lines.append(f"    现价:{c.get('price',0):.2f}")
+            vol_seq = c.get('vol_5d', [])
+            vol_str = " → ".join(f"{v:.1f}亿" for v in vol_seq) if vol_seq else "无数据"
+            vol_trend = ""
+            if len(vol_seq) >= 2:
+                if vol_seq[0] > vol_seq[-1] * 1.3: vol_trend = "↓缩量"
+                elif vol_seq[-1] > vol_seq[0] * 1.3: vol_trend = "↑放量"
+                else: vol_trend = "→持平"
+            batch_lines.append(
+                f"    MACD:{c.get('macd','?')} RSI:{c.get('rsi','?')} MA:{c.get('ma','?')} "
+                f"现价:{c.get('price',0):.2f}"
+            )
+            batch_lines.append(f"    5日量: {vol_str} ({vol_trend})" if vol_trend else f"    5日量: {vol_str}")
 
         # Holdings review (first batch only)
         if batch_idx == 0 and holdings_sells:
@@ -550,6 +562,37 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
         ).fetchall():
             a5_scores[r["ts_code"]] = dict(r)
 
+        # ── Load A1 indicators (volume info, MACD, RSI) ──
+        a1_indicators = {}
+        for r in conn.execute(
+            "SELECT ts_code, indicators_json FROM indicators "
+            "WHERE calc_date = (SELECT MAX(calc_date) FROM indicators)"
+        ).fetchall():
+            try:
+                ind = json.loads(r["indicators_json"])
+                a1_indicators[r["ts_code"]] = {
+                    "vol_ratio": ind.get("volume_ratio", "?"),
+                    "obv": ind.get("obv_trend", "?"),
+                    "macd": ind.get("macd", {}).get("signal", "?"),
+                    "rsi": round(ind.get("rsi_14", 50)),
+                    "ma": ind.get("ma_alignment", "?"),
+                }
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # ── Load 5-day volume series per stock (放量/缩量判断) ──
+        vol_5d = {}
+        for r in conn.execute(
+            "SELECT ts_code, trade_date, amount FROM daily_quotes "
+            "WHERE trade_date >= date('now', '-10 days') "
+            "ORDER BY ts_code, trade_date DESC"
+        ).fetchall():
+            code = r["ts_code"]
+            if code not in vol_5d:
+                vol_5d[code] = []
+            if len(vol_5d[code]) < 5:
+                vol_5d[code].append(round(r["amount"] / 1e8, 1))  # in 亿
+
         # ── Load macro ──
         macro_regime = dict(conn.execute(
             "SELECT regime FROM macro_regime ORDER BY calc_date DESC LIMIT 1"
@@ -702,6 +745,12 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                 "momentum_d60": sc.get("momentum_d60") or 0,
                 "momentum_accel": sc.get("momentum_accel") or 0,
                 "price": price,
+                "vol_ratio": a1_indicators.get(code, {}).get("vol_ratio", "?"),
+                "obv": a1_indicators.get(code, {}).get("obv", "?"),
+                "macd": a1_indicators.get(code, {}).get("macd", "?"),
+                "rsi": a1_indicators.get(code, {}).get("rsi", "?"),
+                "ma": a1_indicators.get(code, {}).get("ma", "?"),
+                "vol_5d": vol_5d.get(code, []),
                 "suggested_shares": shares,
                 "industry": code_industry.get(code, "其他"),
             }

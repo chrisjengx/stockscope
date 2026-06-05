@@ -677,7 +677,7 @@ def _data_quality_notes(metrics: dict) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 def _needs_update(conn, ts_code: str) -> bool:
-    """Check if a stock's report needs updating based on latest financial period."""
+    """Check if a stock's report needs refreshing. Simple age-based: >5 days → refresh."""
     row = conn.execute(
         "SELECT report_json, calc_date FROM fundamental_reports "
         "WHERE ts_code=? ORDER BY calc_date DESC LIMIT 1",
@@ -685,27 +685,11 @@ def _needs_update(conn, ts_code: str) -> bool:
     ).fetchone()
     if not row or not row["report_json"]:
         return True
-
     try:
-        existing = json.loads(row["report_json"])
-        existing_period = existing.get("financial_period", "")
-        existing_date = row["calc_date"]
-
-        ly, lq = _latest_quarter()
-        latest_period = f"{ly}-{str(lq*3).zfill(2)}-01"
-
-        if existing_period < latest_period:
-            return True
-
-        try:
-            last_date = datetime.strptime(existing_date[:10], "%Y-%m-%d")
-            if (datetime.now() - last_date).days > 90:
-                return True
-        except (ValueError, TypeError):
-            return True
-    except (json.JSONDecodeError, KeyError):
+        last_date = datetime.strptime(row["calc_date"][:10], "%Y-%m-%d")
+        return (datetime.now() - last_date).days > 3
+    except (ValueError, TypeError):
         return True
-    return False
 
 # ═══════════════════════════════════════════════════════════════
 # Main entry point
