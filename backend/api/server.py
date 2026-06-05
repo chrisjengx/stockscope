@@ -268,12 +268,12 @@ def api_stocks():
             count_sql = f"""
                 SELECT COUNT(DISTINCT s.ts_code) FROM stocks s
                 LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
-                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code AND t2.updated_at <= ? ORDER BY updated_at DESC LIMIT 1)
+                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code ORDER BY updated_at DESC LIMIT 1)
                 LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
                     AND cs.calc_date = ?
                 {where_clause}
             """
-            total = conn.execute(count_sql, [resolved_date, strategy, resolved_date] + params).fetchone()[0]
+            total = conn.execute(count_sql, [strategy, resolved_date] + params).fetchone()[0]
 
             query_sql = f"""
                 SELECT s.ts_code, s.name, s.industry, t.tier,
@@ -284,29 +284,26 @@ def api_stocks():
                        cs.calc_date as score_date
                 FROM stocks s
                 LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
-                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code AND t2.updated_at <= ? ORDER BY updated_at DESC LIMIT 1)
+                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code ORDER BY updated_at DESC LIMIT 1)
                 LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
                     AND cs.calc_date = ?
                 LEFT JOIN daily_quotes dq ON s.ts_code = dq.ts_code
-                    AND dq.trade_date = (SELECT MAX(trade_date) FROM daily_quotes WHERE trade_date <= ?)
+                    AND dq.trade_date = (SELECT MAX(trade_date) FROM daily_quotes)
                 {where_clause}
                 ORDER BY {sort} {order}
                 LIMIT ? OFFSET ?
             """
-            date_params = [resolved_date, strategy, resolved_date, resolved_date]
+            date_params = [strategy, resolved_date]
             rows = conn.execute(query_sql, date_params + params + [limit, offset]).fetchall()
         else:
             total = 0
             rows = []
 
-        # Tier distribution (from latest snapshot, or from specified date)
+        # Tier distribution (always latest snapshot)
         tier_dist = None
         if tier is None and not industry and not search:
-            tier_date = resolved_date or "9999-99-99"
             dist = conn.execute(
-                "SELECT tier, COUNT(*) as cnt FROM tier_assignments "
-                "WHERE updated_at <= ? GROUP BY tier ORDER BY tier",
-                [tier_date]
+                "SELECT tier, COUNT(*) as cnt FROM tier_assignments GROUP BY tier ORDER BY tier"
             ).fetchall()
             tier_dist = {f"tier_{r['tier']}": r["cnt"] for r in dist}
 
