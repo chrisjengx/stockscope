@@ -185,8 +185,6 @@ def init_db():
         ("ALTER TABLE financials ADD COLUMN beneish_m_score REAL"),
         ("ALTER TABLE financials ADD COLUMN cfo_ni_ratio REAL"),
         ("ALTER TABLE financials ADD COLUMN ar_revenue_divergence REAL"),
-        ("ALTER TABLE composite_scores ADD COLUMN relative_strength REAL DEFAULT 50"),
-        ("ALTER TABLE composite_scores ADD COLUMN volume_confirmation REAL DEFAULT 0.5"),
     ]
     # tier_assignments migration: tier INTEGER → TEXT, add confidence/source
     _tier_migrate = [
@@ -222,33 +220,36 @@ def init_db():
         pass
 
     # composite_scores migration: add strategy column + fix UNIQUE to include strategy
+    # Only runs once — guarded by whether the strategy column already exists
+    _need_cs_migration = False
     try:
         conn.execute("ALTER TABLE composite_scores ADD COLUMN strategy TEXT DEFAULT 'long_term'")
+        _need_cs_migration = True
     except sqlite3.OperationalError:
-        pass
-    # Recreate to fix UNIQUE constraint (SQLite can't ALTER constraints)
-    try:
-        conn.executescript("""
-            CREATE TABLE IF NOT EXISTS composite_scores_new (
+        pass  # strategy column already exists, migration done previously — skip
+
+    if _need_cs_migration:
+        conn.execute("""
+            CREATE TABLE composite_scores_new (
                 ts_code TEXT NOT NULL, calc_date DATE NOT NULL,
                 strategy TEXT NOT NULL DEFAULT 'long_term',
                 tech_score REAL, fundamental_score REAL,
                 macro_fit REAL, momentum REAL,
                 total_score REAL, rank INTEGER, tier_action TEXT,
                 UNIQUE(ts_code, calc_date, strategy)
-            );
-            INSERT OR IGNORE INTO composite_scores_new SELECT
-                ts_code, calc_date, 'long_term',
-                tech_score, fundamental_score, macro_fit, momentum,
-                total_score, rank, tier_action
-            FROM composite_scores;
-            DROP TABLE composite_scores;
-            ALTER TABLE composite_scores_new RENAME TO composite_scores;
+            )
         """)
-    except sqlite3.OperationalError:
-        pass
+        conn.execute("""
+            INSERT OR IGNORE INTO composite_scores_new (ts_code, calc_date, strategy,
+                tech_score, fundamental_score, macro_fit, momentum, total_score, rank, tier_action)
+            SELECT ts_code, calc_date, 'long_term',
+                tech_score, fundamental_score, macro_fit, momentum, total_score, rank, tier_action
+            FROM composite_scores
+        """)
+        conn.execute("DROP TABLE composite_scores")
+        conn.execute("ALTER TABLE composite_scores_new RENAME TO composite_scores")
 
-    # composite_scores: v2 multi-timeframe momentum columns
+    # composite_scores: v2 multi-timeframe momentum columns + A5 extra factors
     for col, col_type in [
         ("trend_type", "TEXT"),
         ("momentum_d3", "REAL"),
@@ -257,6 +258,8 @@ def init_db():
         ("momentum_d60", "REAL"),
         ("momentum_accel", "REAL"),
         ("industry_momentum", "REAL"),
+        ("relative_strength", "REAL DEFAULT 50"),
+        ("volume_confirmation", "REAL DEFAULT 0.5"),
     ]:
         try:
             conn.execute(f"ALTER TABLE composite_scores ADD COLUMN {col} {col_type}")
