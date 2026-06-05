@@ -222,13 +222,14 @@ def api_fusion_report():
 @app.route("/api/stocks")
 def api_stocks():
     page, limit, offset = parse_pagination()
-    tier = request.args.get("tier", type=int)
+    tier = request.args.get("tier")
     industry = request.args.get("industry")
     market = request.args.get("market")
     search = request.args.get("search")
     sort = request.args.get("sort", "total_score")
     order = request.args.get("order", "desc")
     strategy = request.args.get("strategy", "long_term")
+    history = request.args.get("history", 0, type=int)  # 0=latest, 1=previous, 2=two ago ...
 
     valid_sorts = {"total_score", "tech_score", "fundamental_score", "market_cap", "change_pct"}
     if sort not in valid_sorts:
@@ -255,43 +256,73 @@ def api_stocks():
 
         where_clause = "WHERE " + " AND ".join(where) if where else ""
 
-        count_sql = f"""
-            SELECT COUNT(DISTINCT s.ts_code) FROM stocks s
-            LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
-            LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
-            {where_clause}
-        """
-        total = conn.execute(count_sql, [strategy] + params).fetchone()[0]
+        # Resolve history index → real calc_date
+        dates = conn.execute(
+            "SELECT DISTINCT calc_date FROM composite_scores WHERE strategy=? "
+            "ORDER BY calc_date DESC LIMIT ? OFFSET ?",
+            [strategy, 1, history]
+        ).fetchone()
+        resolved_date = dates[0] if dates else None
 
-        query_sql = f"""
-            SELECT s.ts_code, s.name, s.industry, t.tier,
-                   MIN(100, MAX(0, cs.total_score)) as total_score,
-                   MIN(100, MAX(0, cs.tech_score)) as tech_score,
-                   MIN(100, MAX(0, cs.fundamental_score)) as fundamental_score,
-                   dq.close as market_cap_proxy, dq.change_pct
-            FROM stocks s
-            LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
-                AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code ORDER BY updated_at DESC LIMIT 1)
-            LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
-                AND cs.rowid = (SELECT rowid FROM composite_scores cs2 WHERE cs2.ts_code = s.ts_code AND cs2.strategy = ? ORDER BY calc_date DESC LIMIT 1)
-            LEFT JOIN daily_quotes dq ON s.ts_code = dq.ts_code
-                AND dq.trade_date = (SELECT MAX(trade_date) FROM daily_quotes)
-            {where_clause}
-            ORDER BY {sort} {order}
-            LIMIT ? OFFSET ?
-        """
-        rows = conn.execute(query_sql, [strategy, strategy] + params + [limit, offset]).fetchall()
+        if resolved_date:
+            count_sql = f"""
+                SELECT COUNT(DISTINCT s.ts_code) FROM stocks s
+                LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
+                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code AND t2.updated_at <= ? ORDER BY updated_at DESC LIMIT 1)
+                LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
+                    AND cs.calc_date = ?
+                {where_clause}
+            """
+            total = conn.execute(count_sql, [resolved_date, strategy, resolved_date] + params).fetchone()[0]
 
-        # Tier distribution (only when no filter applied)
+            query_sql = f"""
+                SELECT s.ts_code, s.name, s.industry, t.tier,
+                       MIN(100, MAX(0, cs.total_score)) as total_score,
+                       MIN(100, MAX(0, cs.tech_score)) as tech_score,
+                       MIN(100, MAX(0, cs.fundamental_score)) as fundamental_score,
+                       dq.close as market_cap_proxy, dq.change_pct,
+                       cs.calc_date as score_date
+                FROM stocks s
+                LEFT JOIN tier_assignments t ON s.ts_code = t.ts_code
+                    AND t.rowid = (SELECT rowid FROM tier_assignments t2 WHERE t2.ts_code = s.ts_code AND t2.updated_at <= ? ORDER BY updated_at DESC LIMIT 1)
+                LEFT JOIN composite_scores cs ON s.ts_code = cs.ts_code AND cs.strategy = ?
+                    AND cs.calc_date = ?
+                LEFT JOIN daily_quotes dq ON s.ts_code = dq.ts_code
+                    AND dq.trade_date = (SELECT MAX(trade_date) FROM daily_quotes WHERE trade_date <= ?)
+                {where_clause}
+                ORDER BY {sort} {order}
+                LIMIT ? OFFSET ?
+            """
+            date_params = [resolved_date, strategy, resolved_date, resolved_date]
+            rows = conn.execute(query_sql, date_params + params + [limit, offset]).fetchall()
+        else:
+            total = 0
+            rows = []
+
+        # Tier distribution (from latest snapshot, or from specified date)
         tier_dist = None
         if tier is None and not industry and not search:
-            dist = conn.execute("SELECT tier, COUNT(*) as cnt FROM tier_assignments GROUP BY tier ORDER BY tier").fetchall()
+            tier_date = resolved_date or "9999-99-99"
+            dist = conn.execute(
+                "SELECT tier, COUNT(*) as cnt FROM tier_assignments "
+                "WHERE updated_at <= ? GROUP BY tier ORDER BY tier",
+                [tier_date]
+            ).fetchall()
             tier_dist = {f"tier_{r['tier']}": r["cnt"] for r in dist}
+
+        # Available historical dates for this strategy
+        available = conn.execute(
+            "SELECT DISTINCT calc_date FROM composite_scores WHERE strategy=? "
+            "ORDER BY calc_date DESC LIMIT 30",
+            [strategy]
+        ).fetchall()
 
         return jsonify({
             "items": [dict(r) for r in rows],
             "total": total, "page": page, "limit": limit,
             "tier_distribution": tier_dist,
+            "history": resolved_date,
+            "available_history": [r["calc_date"] for r in available],
         })
     finally:
         conn.close()
@@ -327,10 +358,13 @@ def api_stock_detail(ts_code):
         ).fetchall()
 
         # Thesis history
-        thesis = conn.execute(
-            "SELECT * FROM investment_theses WHERE ts_code=? ORDER BY created_at DESC LIMIT 1",
-            (ts_code,)
-        ).fetchone()
+        try:
+            thesis = conn.execute(
+                "SELECT * FROM investment_theses WHERE ts_code=? ORDER BY created_at DESC LIMIT 1",
+                (ts_code,)
+            ).fetchone()
+        except Exception:
+            thesis = None
 
         # A2 fundamental report (LLM deep analysis)
         fund_report = conn.execute(
@@ -392,14 +426,14 @@ def api_portfolio():
 
         # Portfolio aggregate metrics
         total_cost = sum((h["entry_price"] or 0) * (h["shares"] or 0) for h in holdings)
-        total_market = sum((h.get("current_price") or 0) * (h.get("shares") or 0) for h in holdings if h.get("current_price"))
+        total_market = sum((h["current_price"] or 0) * (h["shares"] or 0) for h in holdings if h["current_price"])
         total_pl = total_market - total_cost if total_cost > 0 else 0
         total_weight = sum(h["weight"] or 0 for h in holdings)
 
         # Daily P&L: today's change vs yesterday for all holdings
         daily_pl = 0.0
         for h in holdings:
-            if h.get("current_price") and h.get("shares"):
+            if h["current_price"] and h["shares"]:
                 yesterday = conn.execute(
                     "SELECT close FROM daily_quotes WHERE ts_code=? AND trade_date < (SELECT MAX(trade_date) FROM daily_quotes) ORDER BY trade_date DESC LIMIT 1",
                     (h["ts_code"],)
@@ -608,21 +642,37 @@ def api_decisions():
     conn = get_connection()
     try:
         ts_code = request.args.get("ts_code")
-        where = "WHERE 1=1"
-        params = []
-        if ts_code:
-            where += " AND ts_code = ?"
-            params.append(ts_code)
         strategy = request.args.get("strategy", "long_term")
+        # Relative history index: 0=latest, 1=previous, 2=two ago
+        history = request.args.get("history", 0, type=int)
+
+        where = "WHERE pd.strategy = ?"
+        params = [strategy]
+        if ts_code:
+            where += " AND pd.ts_code = ?"
+            params.append(ts_code)
+
+        # Resolve history index → real calc_date
+        dates = conn.execute(
+            "SELECT DISTINCT calc_date FROM portfolio_decisions WHERE strategy=? "
+            "ORDER BY calc_date DESC LIMIT 1 OFFSET ?",
+            [strategy, history]
+        ).fetchone()
+        calc_dates = [dates] if dates else []
+        if not calc_dates:
+            return jsonify({"decisions": []})
+        date_list = [r[0] for r in calc_dates]
+        placeholders = ",".join(["?"] * len(date_list))
+
         rows = conn.execute(
             f"""SELECT pd.*, cs.rank, cs.total_score,
                 (SELECT close FROM daily_quotes WHERE ts_code=pd.ts_code ORDER BY trade_date DESC LIMIT 1) as current_price
                 FROM portfolio_decisions pd
                 LEFT JOIN composite_scores cs ON pd.ts_code=cs.ts_code AND cs.strategy = ?
                     AND cs.calc_date = (SELECT MAX(calc_date) FROM composite_scores WHERE ts_code=pd.ts_code AND strategy=?)
-                {where} AND pd.calc_date = (SELECT MAX(calc_date) FROM portfolio_decisions)
-                ORDER BY pd.action, pd.ts_code LIMIT 20""",
-            [strategy, strategy] + params
+                {where} AND pd.calc_date IN ({placeholders})
+                ORDER BY pd.calc_date DESC, pd.action, pd.ts_code LIMIT 200""",
+            [strategy, strategy] + params + date_list
         ).fetchall()
 
         # Attach risk_flags for each decision
@@ -815,16 +865,16 @@ def _scheduler_loop():
     Triggers:
     - 08:30: stop A2 Worker (night window ends)
     - 13:15: data fetch (targeted: HOLDING+FAVORED+NEUTRAL only)
-    - 14:05: pipeline both + HTML reports
-    - 16:30: data fetch (closing, full ticker)
-    - 18:00: A0 Gate (daily, Mon-Sat only)
-    - 19:00: daily pipeline both + HTML reports (2nd run)
+    - 14:00: pipeline both + HTML reports
+    - 17:00: data fetch (closing, full ticker)
+    - 18:30: A0 Gate (daily, Mon-Sat only)
+    - 19:20: daily pipeline both + HTML reports (2nd run)
     - 20:00: start A2 Worker (night window 20:00-08:30)
     """
     global _scheduler_running
     _scheduler_running = True
     logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:00, "
-                "data@16:30(full), A0@18:00(Mon-Sat), pipeline2@18:45, A2 start@20:00")
+                "data@17:00(full), A0@18:30(Mon-Sat), pipeline2@19:20, A2 start@20:00")
 
     while _scheduler_running:
         now = datetime.now()
@@ -880,27 +930,27 @@ def _scheduler_loop():
             except Exception as e:
                 logger.error(f"Scheduler pipeline 14:05 failed: {e}")
 
-        # ── Data fetch: 16:30 (closing data) ──
-        if hour == 16 and minute >= 30 and minute < 35 and _should_trigger("data_fetch_16", 300):
-            logger.info("Scheduler: 16:30 data fetch (closing, async)")
+        # ── Data fetch: 17:00 (closing data) ──
+        if hour == 17 and minute >= 0 and minute < 5 and _should_trigger("data_fetch_17", 300):
+            logger.info("Scheduler: 17:00 data fetch (closing, async)")
             try:
                 from backend.data.fetcher import daily_update
                 threading.Thread(target=daily_update, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler data fetch 16:30 failed: {e}")
+                logger.error(f"Scheduler data fetch 17:00 failed: {e}")
 
-        # ── 18:00: A0 Gate daily (Mon-Sat only) ──
-        if weekday != 6 and hour == 18 and minute >= 0 and minute < 5 and _should_trigger("a0_daily", 300):
-            logger.info("Scheduler: 21:00 A0 Gate daily (Mon-Sat)")
+        # ── 18:30: A0 Gate daily (Mon-Sat only) ──
+        if weekday != 6 and hour == 18 and minute >= 30 and minute < 35 and _should_trigger("a0_daily", 300):
+            logger.info("Scheduler: 18:30 A0 Gate daily (Mon-Sat)")
             try:
                 from backend.agents.agent_0_tier import run as a0_run
                 threading.Thread(target=a0_run, kwargs={"mode": "weekly"}, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler A0 21:00 failed: {e}")
+                logger.error(f"Scheduler A0 18:30 failed: {e}")
 
-        # ── Pipeline #2: 18:45 daily ──
-        if hour == 18 and minute >= 45 and minute < 50 and _should_trigger("pipeline_18"):
-            logger.info("Scheduler: 18:45 pipeline both + HTML report (2nd run)")
+        # ── Pipeline #2: 19:20 daily ──
+        if hour == 19 and minute >= 20 and minute < 25 and _should_trigger("pipeline_19"):
+            logger.info("Scheduler: 19:20 pipeline both + HTML report (2nd run)")
             try:
                 from backend.orchestrator import get_orchestrator
                 orch = get_orchestrator()
@@ -910,12 +960,12 @@ def _scheduler_loop():
                         from backend.report import generate_html_report
                         for strat in ['long_term', 'hot_picks']:
                             generate_html_report(strat)
-                        logger.info("HTML reports generated (19:00)")
+                        logger.info("HTML reports generated (19:20)")
                     except Exception as e:
                         logger.error(f"HTML report failed: {e}")
                 threading.Thread(target=_run_and_report, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler pipeline 22:00 failed: {e}")
+                logger.error(f"Scheduler pipeline 19:20 failed: {e}")
 
         # ── 20:00: Start A2 Worker ──
         if hour == 20 and minute >= 0 and minute < 5 and _should_trigger("a2_start", 300):
@@ -1164,6 +1214,8 @@ def api_run_pipeline():
 
 
 if __name__ == "__main__":
+    from backend.data.schema import init_db
+    init_db()
     port = settings.flask_port
     print(f"Stock Analysis API starting on http://localhost:{port}")
     start_scheduler()

@@ -303,8 +303,12 @@ def classify_llm(conn, codes, features):
     codes_list = list(codes)
     random.shuffle(codes_list)  # no order bias per batch
     batch_size = 30
+    total_batches = (len(codes_list) + batch_size - 1) // batch_size
+    batch_num = 0
+    logger.info(f"  LLM starting: {len(codes_list)} stocks in {total_batches} batches (batch_size={batch_size})")
 
     for i in range(0, len(codes_list), batch_size):
+        batch_num += 1
         batch_codes = codes_list[i:i + batch_size]
 
         # Build enriched prompt
@@ -381,6 +385,13 @@ def classify_llm(conn, codes, features):
             f = features[code]
             results[code] = rule_neutral_classify(code, f, source="rule_fallback_llm_fail")
 
+        # Progress: log every 5 batches or every batch when total <= 10
+        if batch_num % 5 == 0 or batch_num == total_batches:
+            classified = len([c for c in batch_codes if c in results and results[c].get("source") != "rule_fallback_llm_fail"])
+            logger.info(f"  LLM batch {batch_num}/{total_batches}: {classified}/{len(batch_codes)} classified, "
+                       f"total_so_far={len(results)}")
+
+    logger.info(f"  LLM complete: {len(results)} total classified")
     return results
 
 

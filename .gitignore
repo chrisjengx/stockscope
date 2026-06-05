@@ -31,4 +31,4 @@ Thumbs.db
 
 # Generated reports
 report/*.html
-backend/data/stockscope.db
+data/stockscope.db
