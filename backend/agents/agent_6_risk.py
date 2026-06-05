@@ -367,7 +367,7 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
             "",
             *score_rubric,
             "",
-            "必须为每只待审股输出一条review——万一遗漏将使用规则兜底审查:",
+            f"以上共{len(batch)}只待审股票, 必须全部输出{len(batch)}条review, 缺一不可。少任何一只将视为审查失败。",
             "输出JSON:",
             '{"reviews": [{"ts_code":"...","risk_score":1-5,',
             '"recommendation":"PREFER/CAUTION/AVOID",',

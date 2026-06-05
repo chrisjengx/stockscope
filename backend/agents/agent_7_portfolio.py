@@ -383,17 +383,19 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             else:
                 batch_lines.append(f"    A2: 缺失")
             vol_seq = c.get('vol_5d', [])
+            close_seq = c.get('close_5d', [])
             vol_str = " → ".join(f"{v:.1f}亿" for v in vol_seq) if vol_seq else "无数据"
+            close_str = " → ".join(f"{p:.2f}" for p in close_seq) if close_seq else ""
             vol_trend = ""
             if len(vol_seq) >= 2:
-                if vol_seq[0] > vol_seq[-1] * 1.3: vol_trend = "↓缩量"
-                elif vol_seq[-1] > vol_seq[0] * 1.3: vol_trend = "↑放量"
+                if vol_seq[0] > vol_seq[-1] * 1.3: vol_trend = "<缩量"
+                elif vol_seq[-1] > vol_seq[0] * 1.3: vol_trend = ">放量"
                 else: vol_trend = "→持平"
             batch_lines.append(
                 f"    MACD:{c.get('macd','?')} RSI:{c.get('rsi','?')} MA:{c.get('ma','?')} "
                 f"现价:{c.get('price',0):.2f}"
             )
-            batch_lines.append(f"    5日量: {vol_str} ({vol_trend})" if vol_trend else f"    5日量: {vol_str}")
+            batch_lines.append(f"    5日量价: 量{vol_str} ({vol_trend}) | 价{close_str}")
 
         # Holdings review (first batch only)
         if batch_idx == 0 and holdings_sells:
@@ -580,18 +582,19 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # ── Load 5-day volume series per stock (放量/缩量判断) ──
-        vol_5d = {}
+        # ── Load 5-day volume + close price series per stock ──
+        vol_price_5d = {}
         for r in conn.execute(
-            "SELECT ts_code, trade_date, amount FROM daily_quotes "
+            "SELECT ts_code, trade_date, amount, close FROM daily_quotes "
             "WHERE trade_date >= date('now', '-10 days') "
             "ORDER BY ts_code, trade_date DESC"
         ).fetchall():
             code = r["ts_code"]
-            if code not in vol_5d:
-                vol_5d[code] = []
-            if len(vol_5d[code]) < 5:
-                vol_5d[code].append(round(r["amount"] / 1e8, 1))  # in 亿
+            if code not in vol_price_5d:
+                vol_price_5d[code] = {"amounts": [], "closes": []}
+            if len(vol_price_5d[code]["amounts"]) < 5:
+                vol_price_5d[code]["amounts"].append(round(r["amount"] / 1e8, 1))
+                vol_price_5d[code]["closes"].append(round(r["close"], 2))
 
         # ── Load macro ──
         macro_regime = dict(conn.execute(
@@ -750,7 +753,8 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                 "macd": a1_indicators.get(code, {}).get("macd", "?"),
                 "rsi": a1_indicators.get(code, {}).get("rsi", "?"),
                 "ma": a1_indicators.get(code, {}).get("ma", "?"),
-                "vol_5d": vol_5d.get(code, []),
+                "vol_5d": vol_price_5d.get(code, {}).get("amounts", []),
+                "close_5d": vol_price_5d.get(code, {}).get("closes", []),
                 "suggested_shares": shares,
                 "industry": code_industry.get(code, "其他"),
             }
