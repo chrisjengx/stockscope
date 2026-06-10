@@ -863,15 +863,15 @@ def _scheduler_loop():
     - 08:30: stop A2 Worker (night window ends)
     - 13:15: data fetch (targeted: HOLDING+FAVORED+NEUTRAL only)
     - 14:00: pipeline both + HTML reports
-    - 17:00: data fetch (closing, full ticker)
-    - 18:30: A0 Gate (daily, Mon-Sat only)
-    - 19:20: daily pipeline both + HTML reports (2nd run)
-    - 20:00: start A2 Worker (night window 20:00-08:30)
+    - 17:30: data fetch (closing, full ticker)
+    - 19:15: A0 Gate (daily, Mon-Sat only)
+    - 20:15: daily pipeline both + HTML reports (2nd run)
+    - 21:00: start A2 Worker (night window 21:00-08:30)
     """
     global _scheduler_running
     _scheduler_running = True
     logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:00, "
-                "data@17:00(full), A0@18:30(Mon-Sat), pipeline2@19:20, A2 start@20:00")
+                "data@17:30(full), A0@19:15(Mon-Sat), pipeline2@20:15, A2 start@21:00")
 
     while _scheduler_running:
         now = datetime.now()
@@ -927,27 +927,27 @@ def _scheduler_loop():
             except Exception as e:
                 logger.error(f"Scheduler pipeline 14:05 failed: {e}")
 
-        # ── Data fetch: 17:00 (closing data) ──
-        if hour == 17 and minute >= 0 and minute < 5 and _should_trigger("data_fetch_17", 300):
-            logger.info("Scheduler: 17:00 data fetch (closing, async)")
+        # ── Data fetch: 17:30 (closing data) ──
+        if hour == 17 and minute >= 30 and minute < 35 and _should_trigger("data_fetch_17", 300):
+            logger.info("Scheduler: 17:30 data fetch (closing, async)")
             try:
                 from backend.data.fetcher import daily_update
                 threading.Thread(target=daily_update, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler data fetch 17:00 failed: {e}")
+                logger.error(f"Scheduler data fetch 17:30 failed: {e}")
 
-        # ── 18:30: A0 Gate daily (Mon-Sat only) ──
-        if weekday != 6 and hour == 18 and minute >= 30 and minute < 35 and _should_trigger("a0_daily", 300):
-            logger.info("Scheduler: 18:30 A0 Gate daily (Mon-Sat)")
+        # ── 19:15: A0 Gate daily (Mon-Sat only) ──
+        if weekday != 6 and hour == 19 and minute >= 15 and minute < 20 and _should_trigger("a0_daily", 300):
+            logger.info("Scheduler: 19:15 A0 Gate daily (Mon-Sat)")
             try:
                 from backend.agents.agent_0_tier import run as a0_run
                 threading.Thread(target=a0_run, kwargs={"mode": "weekly"}, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler A0 18:30 failed: {e}")
+                logger.error(f"Scheduler A0 19:15 failed: {e}")
 
-        # ── Pipeline #2: 19:20 daily ──
-        if hour == 19 and minute >= 20 and minute < 25 and _should_trigger("pipeline_19"):
-            logger.info("Scheduler: 19:20 pipeline both + HTML report (2nd run)")
+        # ── Pipeline #2: 20:15 daily ──
+        if hour == 20 and minute >= 15 and minute < 20 and _should_trigger("pipeline_20"):
+            logger.info("Scheduler: 20:15 pipeline both + HTML report (2nd run)")
             try:
                 from backend.orchestrator import get_orchestrator
                 orch = get_orchestrator()
@@ -957,16 +957,16 @@ def _scheduler_loop():
                         from backend.report import generate_html_report
                         for strat in ['long_term', 'hot_picks']:
                             generate_html_report(strat)
-                        logger.info("HTML reports generated (19:20)")
+                        logger.info("HTML reports generated (20:15)")
                     except Exception as e:
                         logger.error(f"HTML report failed: {e}")
                 threading.Thread(target=_run_and_report, daemon=True).start()
             except Exception as e:
-                logger.error(f"Scheduler pipeline 19:20 failed: {e}")
+                logger.error(f"Scheduler pipeline 20:15 failed: {e}")
 
-        # ── 20:00: Start A2 Worker ──
-        if hour == 20 and minute >= 0 and minute < 5 and _should_trigger("a2_start", 300):
-            logger.info("Scheduler: 20:00 starting A2 Worker (night window)")
+        # ── 21:00: Start A2 Worker ──
+        if hour == 21 and minute >= 0 and minute < 5 and _should_trigger("a2_start", 300):
+            logger.info("Scheduler: 21:00 starting A2 Worker (night window)")
             try:
                 from backend.data.schema import get_connection as gc
                 a2_conn = gc()
@@ -1009,7 +1009,7 @@ def start_a2_worker():
     _a2_worker_active = True
     t = threading.Thread(target=_a2_worker_loop, daemon=True)
     t.start()
-    logger.info("A2 Worker: started (night window 20:00-08:30)")
+    logger.info("A2 Worker: started (night window 21:00-08:30)")
 
 
 def _a2_worker_loop():
@@ -1046,8 +1046,8 @@ def _a2_worker_loop():
         now = datetime.now()
         hour = now.hour
         minute = now.minute
-        # Pause from 08:30 to 20:00 (daytime pipeline window)
-        if (hour == 8 and minute >= 30) or (9 <= hour < 20):
+        # Pause from 08:30 to 21:00 (daytime pipeline window)
+        if (hour == 8 and minute >= 30) or (9 <= hour < 21):
             if _a2_processed > 0:
                 logger.info(f"A2 Worker: outside night window ({hour:02d}:{minute:02d}), "
                            f"pausing ({_a2_processed} processed this session)")

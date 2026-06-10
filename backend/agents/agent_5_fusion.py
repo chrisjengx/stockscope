@@ -229,14 +229,14 @@ def calc_momentum(conn, target_codes):
 
 def classify_trend_type(momentum_data):
     """Classify each stock by trend direction (natural >0 boundary).
-    long_term: d60>0 AND d120>0 (sustained uptrend)
+    long_term: d60>0 AND d20>0 (sustained uptrend)
     short_term: d60>0 (medium-term uptrend)
     declining: everything else
     """
     types = {}
     for code, m in momentum_data.items():
         raw = m["raw"]
-        if raw["d60"] > 0 and raw["d120"] > 0:
+        if raw["d60"] > 0 and raw["d20"] > 0:
             types[code] = "long_term"
         elif raw["d60"] > 0:
             types[code] = "short_term"
@@ -248,9 +248,9 @@ def classify_trend_type(momentum_data):
 def composite_momentum_score(m_raw, trend_type):
     """Blend multi-timeframe momentum into single 0-100 score."""
     if trend_type == "long_term":
-        weights = {"d3": 0.05, "d5": 0.10, "d10": 0.15, "d20": 0.20, "d60": 0.25, "d120": 0.25}
+        weights = {"d3": 0.17, "d5": 0.17, "d10": 0.09, "d20": 0.25, "d60": 0.32}
     else:
-        weights = {"d3": 0.25, "d5": 0.25, "d10": 0.20, "d20": 0.15, "d60": 0.10, "d120": 0.05}
+        weights = {"d3": 0.35, "d5": 0.30, "d10": 0.10, "d20": 0.15, "d60": 0.10}
     score = sum(m_raw[k] * weights[k] for k in weights)
     return round(50 + math.tanh(score / 10) * 40, 1)
 
