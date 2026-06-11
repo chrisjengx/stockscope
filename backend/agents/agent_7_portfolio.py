@@ -105,23 +105,29 @@ def compute_conviction(code, a5_scores, a2_report, fusion_fragility, macro_regim
     # d3/d5 dual-negative penalty (replaces hard REJECT rule)
     d3_d5_penalty = 0.15 if (momentum_d3 < 0 and momentum_d5 < 0) else 0.0
 
-    # Strategy-differentiated conviction weights
+    # Adaptive weights: when A2 data is sparse/low-confidence, shift weight
+    # from fundamentals → momentum instead of penalizing the stock.
+    # a2_conf ∈ [0,1] drives the blend: 1=full A2, 0=no A2.
     if strategy == "hot_picks":
-        conviction = (
-            base * 0.25 +
-            momentum_quality * 0.35 +    # primary: momentum is everything
-            a2_factor * 0.08 +           # fundamentals: data quality only
-            fragility * 0.12 +            # trend health
-            (1.0 - rf_penalty - d3_d5_penalty) * 0.20
-        )
+        w_base = 0.25
+        w_mom  = 0.35 + (1 - a2_conf) * 0.07    # 0.35 → 0.42 when no A2
+        w_a2   = 0.08 * a2_conf                   # 0.08 → 0.00 when no A2
+        w_frag = 0.12
+        w_safe = 1.0 - w_base - w_mom - w_a2 - w_frag
     else:  # long_term
-        conviction = (
-            base * 0.25 +
-            momentum_quality * 0.25 +    # balanced: quality + sustainability
-            a2_factor * 0.15 +           # fundamentals matter more
-            fragility * 0.15 +            # trend stability matters more
-            (1.0 - rf_penalty - d3_d5_penalty) * 0.20
-        )
+        w_base = 0.25
+        w_mom  = 0.25 + (1 - a2_conf) * 0.13    # 0.25 → 0.38 when no A2
+        w_a2   = 0.15 * a2_conf                   # 0.15 → 0.00 when no A2
+        w_frag = 0.15
+        w_safe = 1.0 - w_base - w_mom - w_a2 - w_frag
+
+    conviction = (
+        base * w_base +
+        momentum_quality * w_mom +
+        a2_factor * w_a2 +
+        fragility * w_frag +
+        (1.0 - rf_penalty - d3_d5_penalty) * w_safe
+    )
     return round(max(0.05, min(1.0, conviction)), 3)
 
 
@@ -300,10 +306,11 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         f"权重范围: {cfg['min_single_weight']:.0%}-{cfg['max_single_weight']:.0%}",
         f"A5趋势分析: {fusion_narrative}",
         f"",
-        f"=== 板块资金偏好（来自宏观分析，选股参考，非硬性约束） ===",
+        f"=== 板块资金偏好（来自宏观分析） ===",
         f"{sector_view if sector_view else '板块数据暂不可用'}",
         "",
-        "强势板块有资金支撑，弱势板块需更强个股逻辑才能纳入。",
+        f"{'资金流向是短期交易的核心依据，应作为重要决策因子：' if strategy == 'hot_picks' else '强势板块有资金支撑，弱势板块需更强个股逻辑才能纳入。'}"
+        f"{'\\n- 资金流入板块 → 降低基本面门槛，顺势而为\\n- 资金流出板块 → 即使技术面尚可，警惕板块拖累，提高纳入门槛\\n- 板块无明确方向 → 依靠个股自身动能' if strategy == 'hot_picks' else ''}",
         f"",
         f"=== 市场背景新闻（近3天参考，非指令）===",
         f"{market_news_str}",
@@ -382,14 +389,14 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
                 batch_lines.append(f"    A2: 盈{a2.get('eq','?')} 财{a2.get('fh','?')} 估{a2.get('val','?')} | 红旗:{a2.get('rfs',[]) or '无'} | 置信:{a2.get('conf',0):.0%}")
             else:
                 batch_lines.append(f"    A2: 缺失")
-            vol_seq = c.get('vol_5d', [])
-            close_seq = c.get('close_5d', [])
+            vol_seq = list(reversed(c.get('vol_5d', [])))   # oldest → newest
+            close_seq = list(reversed(c.get('close_5d', [])))
             vol_str = " → ".join(f"{v:.1f}亿" for v in vol_seq) if vol_seq else "无数据"
             close_str = " → ".join(f"{p:.2f}" for p in close_seq) if close_seq else ""
             vol_trend = ""
             if len(vol_seq) >= 2:
-                if vol_seq[0] > vol_seq[-1] * 1.3: vol_trend = "<缩量"
-                elif vol_seq[-1] > vol_seq[0] * 1.3: vol_trend = ">放量"
+                if vol_seq[-1] > vol_seq[0] * 1.3: vol_trend = ">放量"
+                elif vol_seq[0] > vol_seq[-1] * 1.3: vol_trend = "<缩量"
                 else: vol_trend = "→持平"
             batch_lines.append(
                 f"    MACD:{c.get('macd','?')} RSI:{c.get('rsi','?')} MA:{c.get('ma','?')} "

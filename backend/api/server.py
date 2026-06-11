@@ -973,7 +973,8 @@ def _scheduler_loop():
                 stale = a2_conn.execute(
                     "SELECT COUNT(*) FROM tier_assignments ta WHERE ta.tier IN ('HOLDING','FAVORED','NEUTRAL') "
                     "AND (ta.ts_code NOT IN (SELECT ts_code FROM fundamental_reports) "
-                    "OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code=ta.ts_code) < date('now','-7 days'))"
+                    "OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code=ta.ts_code) IS NULL "
+                    "OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code=ta.ts_code) < date('now', '-3 days'))"
                 ).fetchone()[0]
                 a2_conn.close()
                 logger.info(f"A2 refresh: {stale} stocks need updates, starting worker")
@@ -1060,19 +1061,15 @@ def _a2_worker_loop():
             conn = get_connection()
             logger.info("A2 Worker: DB connected, looking for next stock...")
 
-            # Priority: stocks whose tier changed since last A0 run → analyze first
-            # Then: HOLDING not analyzed > FAVORED not analyzed > NEUTRAL not analyzed
-            # Then: reports older than 7 days (weekly refresh)
+            # Priority: no report first, then stale reports (3+ days old)
             code = conn.execute("""
                 SELECT ta.ts_code FROM tier_assignments ta
                 WHERE ta.tier IN ('HOLDING', 'FAVORED', 'NEUTRAL')
                   AND (ta.ts_code NOT IN (SELECT ts_code FROM fundamental_reports)
-                       OR ta.updated_at > (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = ta.ts_code)
                        OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = ta.ts_code) IS NULL
-                       OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = ta.ts_code) < date('now', '-7 days'))
+                       OR (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = ta.ts_code) < date('now', '-3 days'))
                 ORDER BY
-                  CASE WHEN ta.updated_at > COALESCE((SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = ta.ts_code), '2000-01-01')
-                       THEN 0 ELSE 1 END,
+                  CASE WHEN ta.ts_code NOT IN (SELECT ts_code FROM fundamental_reports) THEN 0 ELSE 1 END,
                   CASE ta.tier WHEN 'HOLDING' THEN 0 WHEN 'FAVORED' THEN 1 ELSE 2 END
                 LIMIT 1
             """).fetchone()
