@@ -59,13 +59,12 @@ def generate_html_report(strategy="long_term", trade_date=None):
     # ── Focus List ──
     fl_rows = conn.execute("SELECT fl.ts_code, fl.name, s.industry, fl.total_score, fl.rank, fl.tier FROM focus_list fl LEFT JOIN stocks s ON fl.ts_code=s.ts_code WHERE fl.strategy=? ORDER BY fl.position", (strategy,)).fetchall()
 
-    # Category counts: split multi-value tier strings (e.g. "稳健型,动量型")
+    # Category counts: single-value tier labels (e.g. "价值优选", "动能热点")
     cat_counts = {}
     for r in fl_rows:
-        for tag in (r["tier"] or "").split(","):
-            tag = tag.strip()
-            if tag:
-                cat_counts[tag] = cat_counts.get(tag, 0) + 1
+        tag = (r["tier"] or "一般关注").strip()
+        if tag:
+            cat_counts[tag] = cat_counts.get(tag, 0) + 1
     fl_cats = sorted(cat_counts.items(), key=lambda x: -x[1])
 
     # ── A5 Top 50: Focus List stocks sorted by total_score (what enters the pipeline) ──

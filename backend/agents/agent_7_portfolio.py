@@ -714,7 +714,7 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
 
         # Sort by conviction, take enough for LLM to choose from
         focus_convictions.sort(key=lambda x: -x[1])
-        sample_pct = 0.50 if strategy == "long_term" else 0.80
+        sample_pct = 0.40 if strategy == "long_term" else 0.40
         max_candidates = max(15, int(len(focus_convictions) * sample_pct))
         pool_codes = [c for c, _ in focus_convictions[:max_candidates]]
 
