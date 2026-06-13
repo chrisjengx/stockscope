@@ -9,7 +9,7 @@ Pipeline:
 """
 import os, sys, time, logging
 from datetime import datetime, timedelta
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
 
 sys.path.insert(0, os.path.expanduser("~/stock-analysis"))
 from backend.data.schema import get_connection
@@ -41,45 +41,59 @@ def update_stock_list():
     return total
 
 
-def fetch_one_daily(ts_code, start_date, end_date):
-    """Fetch daily OHLCV from akshare (sina source). Primary source — most timely."""
+def fetch_one_daily(ts_code, start_date, end_date, timeout=15):
+    """Fetch daily OHLCV from akshare. Primary source. Timeout-protected."""
     import akshare as ak
-    try:
+    def _fetch():
         code = ts_code.split(".")[0]
         market = ts_code.split(".")[1].lower()
         symbol = f"{market}{code}"
-        df = ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=end_date, adjust="")
+        return ak.stock_zh_a_daily(symbol=symbol, start_date=start_date, end_date=end_date, adjust="")
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            df = future.result(timeout=timeout)
         return ts_code, df
+    except FuturesTimeoutError:
+        logger.warning(f"{ts_code} akshare TIMEOUT ({timeout}s)")
+        return ts_code, None
     except Exception as e:
-        logger.debug(f"{ts_code} akshare: {e}")
+        logger.warning(f"{ts_code} akshare ERROR: {e}")
         return ts_code, None
 
 
-def fetch_daily_baostock(ts_code, start_date, end_date):
-    """Fetch daily OHLCV from baostock. Secondary source — fills gaps, cross-validates."""
+def fetch_daily_baostock(ts_code, start_date, end_date, timeout=15):
+    """Fetch daily OHLCV from baostock. Fallback source. Timeout-protected."""
     import baostock as bs
-    try:
+    import pandas as pd
+    def _fetch():
         code = ts_code.split(".")[0]
         market = ts_code.split(".")[1].lower()
         bs_code = f"{market}.{code}"
-        # baostock date format: YYYY-MM-DD
         rs = bs.query_history_k_data_plus(
             bs_code, "date,open,high,low,close,volume,amount,turn,pctChg",
             start_date=start_date, end_date=end_date, frequency="d", adjustflag="2"
         )
         if rs.error_code != "0":
-            return ts_code, None
-        import pandas as pd
+            return None
         data = []
         while rs.next():
             data.append(rs.get_row_data())
         if not data:
-            return ts_code, None
+            return None
         df = pd.DataFrame(data, columns=["date", "open", "high", "low", "close", "volume", "amount", "turn", "pct_chg"])
         df["date"] = df["date"].str[:10]
+        return df
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            df = future.result(timeout=timeout)
         return ts_code, df
+    except FuturesTimeoutError:
+        logger.warning(f"{ts_code} baostock TIMEOUT ({timeout}s)")
+        return ts_code, None
     except Exception as e:
-        logger.debug(f"{ts_code} baostock: {e}")
+        logger.warning(f"{ts_code} baostock ERROR: {e}")
         return ts_code, None
 
 
@@ -97,28 +111,36 @@ def merge_daily_data(df_ak, df_bs):
 
 
 def save_daily_data(ts_code, df, conn):
-    """Save daily OHLCV data to DB."""
+    """Save daily OHLCV data to DB. change_pct computed from close prices."""
     if df is None or df.empty:
         return 0
+    df = df.copy()
+    df["date"] = df["date"].astype(str).str[:10]
+    df = df.sort_values("date")
+    closes = df["close"].astype(float).values
+    prev_close = None
     count = 0
-    for _, row in df.iterrows():
+    for i, (_, row) in enumerate(df.iterrows()):
         try:
+            close = float(row.get("close", 0) or 0)
+            if prev_close is not None and prev_close > 0:
+                change_pct = round((close / prev_close - 1) * 100, 4)
+            else:
+                change_pct = 0.0
+            prev_close = close
+            # Normalize turnover: akshare decimal, baostock percentage
+            turnover_raw = float(row.get("turnover", 0) or 0)
+            if turnover_raw > 1:
+                turnover_raw = turnover_raw / 100
             conn.execute(
                 """INSERT OR IGNORE INTO daily_quotes
                    (ts_code, trade_date, open, high, low, close, volume, amount, turnover, change_pct)
                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                (
-                    ts_code,
-                    str(row.get("date", ""))[:10],
-                    float(row.get("open", 0) or 0),
-                    float(row.get("high", 0) or 0),
-                    float(row.get("low", 0) or 0),
-                    float(row.get("close", 0) or 0),
-                    float(row.get("volume", 0) or 0),
-                    float(row.get("amount", 0) or 0),
-                    float(row.get("turnover", 0) or 0),
-                    float(row.get("pct_chg", 0) or 0),
-                ),
+                (ts_code, str(row.get("date", ""))[:10],
+                 float(row.get("open", 0) or 0), float(row.get("high", 0) or 0),
+                 float(row.get("low", 0) or 0), close,
+                 float(row.get("volume", 0) or 0), float(row.get("amount", 0) or 0),
+                 turnover_raw, change_pct),
             )
             count += 1
         except (ValueError, KeyError):
@@ -185,27 +207,32 @@ def daily_update(target_tiers=None, max_workers=1):
     total_rows = 0
     stocks_today = 0
     ak_ok = 0
-    bs_ok_count = 0
+    bs_fallback = 0
     conn = get_connection()
     for i, code in enumerate(codes):
         try:
-            # Per-stock start date: fill individual gaps, not just global latest
             stock_start = stock_last.get(code, default_start)
+            # Primary: akshare
             _, df_ak = fetch_one_daily(code, stock_start, trade_date)
-            _, df_bs = (fetch_daily_baostock(code, stock_start, trade_date) if bs_ok else (code, None))
-            df = merge_daily_data(df_ak, df_bs)
+            if df_ak is not None and not df_ak.empty:
+                df = df_ak
+                ak_ok += 1
+            elif bs_ok:
+                # akshare failed — log and fallback to baostock
+                logger.warning(f"{code} akshare returned empty, falling back to baostock")
+                _, df_bs = fetch_daily_baostock(code, stock_start, trade_date)
+                df = df_bs
+                if df is not None and not df.empty:
+                    bs_fallback += 1
+            else:
+                df = None
             if df is not None and not df.empty:
                 rows = save_daily_data(code, df, conn)
                 total_rows += rows
-                if df_ak is not None and not df_ak.empty:
-                    ak_ok += 1
-                if df_bs is not None and not df_bs.empty:
-                    bs_ok_count += 1
-                # Check if today's date was actually covered
-                if df["date"].str[:10].eq(trade_date).any() and rows > 0:
+                if df["date"].astype(str).str[:10].eq(trade_date).any() and rows > 0:
                     stocks_today += 1
         except Exception as e:
-            logger.debug(f"{code}: {e}")
+            logger.warning(f"{code} unexpected ERROR: {e}")
         if (i + 1) % 100 == 0:
             conn.commit()
             elapsed = time.time() - start
@@ -217,7 +244,7 @@ def daily_update(target_tiers=None, max_workers=1):
     conn.close()
     elapsed = time.time() - start
     logger.info(f"Daily update complete: {stocks_today}/{len(codes)} stocks ({trade_date}) "
-               f"+ {total_rows} total rows (akshare:{ak_ok} baostock:{bs_ok_count}) in {elapsed:.0f}s")
+               f"+ {total_rows} total rows (akshare:{ak_ok} baostock_fallback:{bs_fallback}) in {elapsed:.0f}s")
     return stocks_today
 
 

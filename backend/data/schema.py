@@ -185,6 +185,8 @@ def init_db():
         ("ALTER TABLE financials ADD COLUMN beneish_m_score REAL"),
         ("ALTER TABLE financials ADD COLUMN cfo_ni_ratio REAL"),
         ("ALTER TABLE financials ADD COLUMN ar_revenue_divergence REAL"),
+        ("ALTER TABLE focus_list ADD COLUMN value_score REAL"),
+        ("ALTER TABLE focus_list ADD COLUMN momentum_score REAL"),
     ]
     # tier_assignments migration: tier INTEGER → TEXT, add confidence/source
     _tier_migrate = [

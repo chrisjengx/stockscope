@@ -215,17 +215,24 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
     a2_covered = sum(1 for c in codes if fund_reports.get(c, {}).get("confidence", 0) > 0)
     a3_covered = sum(1 for c in codes if c in news)
 
-    # ── A5 factor attribution + ranking concerns for A6 to reference ──
+    # ── A5 market narrative context for A6 to reference ──
     fa_list = fusion_report.get("factor_attribution", []) if fusion_report else []
-    rc_list = fusion_report.get("ranking_concerns", []) if fusion_report else []
-    fa_str = "; ".join(
-        f"{f.get('ts_code','?')}:{f.get('primary_driver','?')}({f.get('fragility','?')})"
-        for f in fa_list[:10]
-    ) if fa_list else "无"
-    rc_str = "; ".join(
-        f"{r.get('ts_code','?')}:{r.get('issue','?')[:60]}"
-        for r in rc_list[:5]
-    ) if rc_list else "无"
+    rc_raw = fusion_report.get("ranking_concerns", "") if fusion_report else ""
+    # Handle both old (list) and new (string) formats
+    if isinstance(rc_raw, list):
+        rc_str = "; ".join(
+            f"{r.get('ts_code','?')}:{r.get('issue','?')[:60]}"
+            for r in rc_raw[:5]
+        ) if rc_raw else "无"
+    else:
+        rc_str = str(rc_raw) if rc_raw else "无"
+    if fa_list:
+        fa_str = "; ".join(
+            f"{f.get('ts_code','?')}:{f.get('primary_driver','?')}({f.get('fragility','?')})"
+            for f in fa_list[:10]
+        )
+    else:
+        fa_str = "无 (因子归因已由FL计算引擎替代)"
 
     # ── Market background news (moderate weight, context only) ──
     market_news = []
@@ -246,8 +253,8 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
         f"=== 市场背景新闻（近3天参考，非指令，权重适中）===",
         f"{market_news_str}",
         f"",
-        f"A5因子归因: {fa_str}",
-        f"A5排名质疑: {rc_str}",
+        f"因子归因: {fa_str}",
+        f"排名分析: {rc_str}",
         f"",
         "=== 待审股票 ===",
         "",
@@ -299,7 +306,7 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
             t = sc.get("tech_score", 50); f = sc.get("fundamental_score", 50); m = sc.get("momentum", 50)
 
             batch_lines.append(
-                f"{code} {a7_tag} [{driver_tag}] {data_tag} A5#{rank}/{total:.0f} "
+                f"{code} {a7_tag} [{driver_tag}] {data_tag} FL#{rank}/{total:.0f} "
                 f"[T:{t:.0f} F:{f:.0f} M:{m:.0f}] {ind}"
             )
             batch_lines.append(f"  A1: {tr.get('overall_assessment','无')[:130]}")
@@ -329,7 +336,7 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
         if sector_view:
             batch_lines.append(f"A4板块强弱: {sector_view[:200]}")
         batch_lines.append(f"A4宏观: {macro_report.get('narrative','无')[:150]}")
-        batch_lines.append(f"A5融合: {fusion_report.get('overall_narrative','无')[:200]}")
+        batch_lines.append(f"市场叙事: {fusion_report.get('overall_narrative','无')[:200]}")
         if a7_portfolio:
             batch_lines.append(
                 f"A7组合: 纳入{a7_portfolio.get('include_count','?')}只 | "

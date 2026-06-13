@@ -76,7 +76,7 @@ class LLMClient:
                     f"{self._base}/chat/completions",
                     headers=self._headers,
                     json=body,
-                    timeout=self.settings.llm_timeout,
+                    timeout=(30, self.settings.llm_timeout),  # (connect, read)
                 )
                 if r.status_code == 200:
                     return r.json()["choices"][0]["message"]["content"]
@@ -116,7 +116,7 @@ class LLMClient:
                     f"{self._base}/v1/messages",
                     headers=self._headers,
                     json=body,
-                    timeout=self.settings.llm_timeout,
+                    timeout=(30, self.settings.llm_timeout),  # (connect, read)
                 )
                 if r.status_code == 200:
                     data = r.json()

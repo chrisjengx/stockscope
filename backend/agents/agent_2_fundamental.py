@@ -594,8 +594,22 @@ PE={metrics.get('pe_ttm')}  PB={metrics.get('pb')}  PS={metrics.get('ps')}
 
 9. 综合描述 — 200-500字，基于以上各维度分析，形成对该公司的整体描述
 
+10. 综合评分 — 基于以上所有分析，给出一个 0-100 的"基本面投资价值"分数。
+    这不是估值高低，也不是股价涨跌预测。它回答：这家公司作为一门生意，质量如何？
+
+    评分锚点：
+      90-100: 盈利质量高+财务健康+持续成长，行业竞争力强
+      70-89:  盈利稳健+财务结构良好+有一定成长性，优质公司
+      50-69:  盈利一般或财务尚可或成长放缓，中性
+      30-49:  盈利承压或财务有隐忧或成长停滞，偏弱
+      10-29:  亏损或财务恶化，差
+      0-9:    严重亏损+财务危机+多红旗，极差
+
+    如数据严重不足只能给出低置信估计，confidence 应相应降低。
+    fundamental_score 和 confidence 必须自洽：低 confidence 时 fundamental_score 应趋于 40-60（保守估计）。
+
 输出JSON：
-{{"earnings_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","positive_factors":["..."],"negative_factors":["..."]}},"growth_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","organic_growth_pct":null,"anomaly_notes":["..."]}},"financial_health":{{"rating":"GOOD/FAIR/POOR/UNKNOWN","debt_concern":false,"liquidity_concern":false}},"valuation":{{"rating":"OVERPRICED/FAIR/UNDERPRICED/UNKNOWN","reasoning":"..."}},"red_flags":[{{"severity":"HIGH/MEDIUM/LOW","flag":"...","detail":"..."}}],"blind_spots":["..."],"marginal_change":"最近季度改善/恶化信号","short_term_notes":"短期关注点","narrative":"...","confidence":0.0-1.0}}"""
+{{"earnings_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","positive_factors":["..."],"negative_factors":["..."]}},"growth_quality":{{"rating":"HIGH/MEDIUM/LOW/UNKNOWN","organic_growth_pct":null,"anomaly_notes":["..."]}},"financial_health":{{"rating":"GOOD/FAIR/POOR/UNKNOWN","debt_concern":false,"liquidity_concern":false}},"valuation":{{"rating":"OVERPRICED/FAIR/UNDERPRICED/UNKNOWN","reasoning":"..."}},"red_flags":[{{"severity":"HIGH/MEDIUM/LOW","flag":"...","detail":"..."}}],"blind_spots":["..."],"marginal_change":"最近季度改善/恶化信号","short_term_notes":"短期关注点","narrative":"...","confidence":0.0-1.0,"fundamental_score":0-100,"score_rationale":"评分理由(80字以内)"}}"""
     result = llm.chat_json(prompt, model=cfg["model"], max_tokens=cfg["max_tokens"],
                            temperature=cfg.get("temperature", 0.3))
 
@@ -647,6 +661,8 @@ def save_fundamental_report(conn, ts_code: str, calc_date: str, metrics: dict,
         "blind_spots": (llm_result or {}).get("blind_spots", []),
         "narrative": (llm_result or {}).get("narrative", ""),
         "confidence": (llm_result or {}).get("confidence", 0),
+        "fundamental_score": (llm_result or {}).get("fundamental_score"),
+        "score_rationale": (llm_result or {}).get("score_rationale", ""),
         "data_quality_notes": _data_quality_notes(metrics),
     }
     report_json = json.dumps(report, ensure_ascii=False)

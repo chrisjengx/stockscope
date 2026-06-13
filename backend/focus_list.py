@@ -1,16 +1,18 @@
 """
-Focus List Manager — dual-strategy independent scoring.
+Focus List Manager — unified factor engine (merged A5 + FL).
 
-Two continuous scores per stock:
-  value_score    → long_term FL (fundamentals + trend sustainability)
-  momentum_score → hot_picks FL  (short-term momentum + volume + sector flow)
+Two strategies, each with dual-path selection:
+  long_term: A2 fundamental ranking (120) + FL trend_quality (80) → union
+  hot_picks: 早起上涨 early_momentum (80) + 持续上涨 d5>0+d60>0 (40) → union
 
+All factor computation is pure math — no LLM in the scoring path.
+A2's LLM analysis (fundamental_reports) is consumed as structured data.
 Missing A2 data → auto-switch to independent weight formulas (no binary reject).
 """
 import json
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 from backend.data.schema import get_connection
@@ -21,13 +23,211 @@ setup_logging()
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-TOP_PCT = 0.12     # default, overridden per strategy in rebuild()
-MIN_TOTAL_SCORE = 25  # quality floor for focus list inclusion
+TOP_PCT = 0.12
+MIN_TOTAL_SCORE = 25
 
-# ── helpers ──
 
 def _clamp(v, lo=0, hi=100):
     return max(lo, min(hi, v))
+
+
+# ═══════════════════════════════════════════════
+# Factor computation (from former A5)
+# ═══════════════════════════════════════════════
+
+def calc_momentum(conn, target_codes):
+    """Multi-timeframe momentum: 3/5/10/20/60 trading-day lookback."""
+    result = {}
+    for code in target_codes:
+        rows = conn.execute(
+            "SELECT trade_date, close, volume FROM daily_quotes WHERE ts_code=? ORDER BY trade_date DESC LIMIT 125",
+            (code,),
+        ).fetchall()
+        if len(rows) < 22:
+            continue
+        dates = [r["trade_date"] for r in rows]
+        closes = [r["close"] for r in rows]
+        volumes = [r["volume"] for r in rows]
+        def _pct(days):
+            if len(closes) > days and closes[days] > 0:
+                return round((closes[0] - closes[days]) / closes[days] * 100, 1)
+            return 0.0
+        if len(volumes) >= 25:
+            vol_5d = sum(volumes[:5]) / 5
+            vol_20d = sum(volumes[5:25]) / 20
+            vol_ratio = round(vol_5d / vol_20d, 2) if vol_20d > 0 else 1.0
+        else:
+            vol_ratio = 1.0
+        raw = {"d3": _pct(3), "d5": _pct(5), "d10": _pct(10),
+               "d20": _pct(20), "d60": _pct(60) if len(closes) > 60 else _pct(20),
+               "vol_ratio": vol_ratio}
+        accel = round(raw["d3"] * 5/3 - raw["d5"], 1)
+        has_gap = False
+        for i in range(min(10, len(dates) - 1)):
+            try:
+                d1 = datetime.strptime(dates[i], "%Y-%m-%d")
+                d2 = datetime.strptime(dates[i + 1], "%Y-%m-%d")
+                if (d1 - d2).days > 5:
+                    has_gap = True; break
+            except (ValueError, TypeError): pass
+        result[code] = {"raw": raw, "acceleration": accel, "has_gap": has_gap, "latest_date": dates[0] if dates else ""}
+    return result
+
+
+def classify_trend_type(momentum_data):
+    types = {}
+    for code, m in momentum_data.items():
+        raw = m["raw"]
+        if raw["d60"] > 0 and raw["d20"] > 0: types[code] = "long_term"
+        elif raw["d60"] > 0: types[code] = "short_term"
+        else: types[code] = "declining"
+    return types
+
+
+def composite_momentum_score(m_raw, trend_type):
+    if trend_type == "long_term":
+        weights = {"d3": 0.17, "d5": 0.17, "d10": 0.09, "d20": 0.25, "d60": 0.32}
+    else:
+        weights = {"d3": 0.35, "d5": 0.30, "d10": 0.10, "d20": 0.15, "d60": 0.10}
+    score = sum(m_raw[k] * weights[k] for k in weights)
+    return round(50 + math.tanh(score / 10) * 40, 1)
+
+
+def _compute_tech_score(ind, strategy="long_term"):
+    components, weights = [], []
+    macd = ind.get("macd", {})
+    hist = macd.get("histogram", 0)
+    if isinstance(hist, (int, float)):
+        components.append(50 + math.tanh(hist * 10) * 40); weights.append(1.0)
+    rsi = ind.get("rsi_14", 50)
+    if isinstance(rsi, (int, float)):
+        if strategy == "hot_picks": components.append(rsi)
+        else:
+            if rsi > 80: components.append(55)
+            elif rsi > 70: components.append(65)
+            elif rsi < 30: components.append(45)
+            else: components.append(rsi)
+        weights.append(1.0)
+    bb = ind.get("bollinger", {})
+    bb_pos = bb.get("position", 0.5)
+    if isinstance(bb_pos, (int, float)):
+        components.append(100 - abs(bb_pos - 0.5) * 200); weights.append(0.5)
+    ma = ind.get("ma_alignment", "mixed")
+    components.append({"bullish": 75, "mixed": 50, "bearish": 25}.get(ma, 50)); weights.append(1.0)
+    obv_trend = ind.get("obv_trend", "flat")
+    components.append({"rising": 65, "flat": 50, "falling": 35}.get(obv_trend, 50)); weights.append(0.5)
+    vr = ind.get("volume_ratio", 1.0)
+    if isinstance(vr, (int, float)):
+        components.append(50 + math.tanh((vr - 1.0) * 2) * 25); weights.append(0.3)
+    if not components: return 50.0
+    return max(0.0, min(100.0, sum(c * w for c, w in zip(components, weights)) / sum(weights)))
+
+
+# ═══════════════════════════════════════════════
+# Gate functions
+# ═══════════════════════════════════════════════
+
+def _gate_hot_picks(a2, vol_quality, d3, d5, d60):
+    """Hot-picks gates: fundamental hard-fail + volume floor + trend + short direction."""
+    # Gate 1: fundamental hard-fail
+    if a2 is not None:
+        fh = a2.get("financial_health", {}) if isinstance(a2.get("financial_health"), dict) else {}
+        eq = a2.get("earnings_quality", {}) if isinstance(a2.get("earnings_quality"), dict) else {}
+        fh_rating = fh.get("rating", "?") if isinstance(fh, dict) else "?"
+        eq_rating = eq.get("rating", "?") if isinstance(eq, dict) else "?"
+        rfs = a2.get("red_flags", [])
+        if fh_rating == "POOR" and eq_rating == "LOW":
+            return False, "基本面崩溃(财务差+盈利差)"
+        high_rfs = [rf for rf in rfs if isinstance(rf, dict) and rf.get("severity") == "HIGH"]
+        if len(rfs) >= 5 and len(high_rfs) >= 3:
+            return False, f"多项高风险红旗({len(high_rfs)}HIGH/{len(rfs)}total)"
+    # Gate 2: volume floor
+    if vol_quality < 30:
+        return False, f"无量上涨(量价质量{vol_quality:.0f}<30)"
+    # Gate 3: trend direction
+    if (d5 or 0) < 0 and (d60 or 0) < 0:
+        return False, f"下跌趋势(d5={d5:.0f}%<0 d60={d60:.0f}%<0)"
+    # Gate 4: short-term must be rising
+    if (d3 or 0) <= 0:
+        return False, f"短期未涨(d3={d3:.0f}%≤0)"
+    return True, "PASS"
+
+
+def _gate_long_term(a2, d20, d60):
+    """Long-term gates: fundamental floor + trend + valuation."""
+    # Gate 1: fundamental floor
+    if a2 is not None:
+        fs = a2.get("fundamental_score")
+        if fs is not None and fs < 30:
+            return False, f"基本面过弱(评分{fs:.0f}<30)"
+    # Gate 2: trend direction
+    if (d20 or 0) < 0 and (d60 or 0) < 0:
+        return False, f"下跌趋势(d20={d20:.0f}%<0 d60={d60:.0f}%<0)"
+    # Gate 3: valuation ceiling
+    if a2 is not None:
+        fs = a2.get("fundamental_score")
+        if fs is not None:
+            val = a2.get("valuation", {}) if isinstance(a2.get("valuation"), dict) else {}
+            val_rating = val.get("rating", "?") if isinstance(val, dict) else "?"
+            if val_rating == "OVERPRICED" and fs < 50:
+                return False, "高估+基本面一般(双杀风险)"
+    return True, "PASS"
+
+
+# ═══════════════════════════════════════════════
+# Data helpers
+# ═══════════════════════════════════════════════
+
+def _fundamental_fallback(conn, code):
+    """Pure-computation fundamental score for stocks without A2 report."""
+    row = conn.execute("""
+        SELECT roe, gross_margin, debt_ratio, revenue_yoy, fcf_ratio, pe_percentile
+        FROM financials WHERE ts_code=? ORDER BY report_date DESC LIMIT 1
+    """, (code,)).fetchone()
+    if not row: return 40.0, 0.2
+    score = 40.0
+    if row["roe"]: score += min(20, max(-20, row["roe"] * 1.0))
+    if row["gross_margin"]: score += min(15, max(-10, (row["gross_margin"] - 15) * 0.5))
+    if row["revenue_yoy"]: score += min(10, max(-10, row["revenue_yoy"] * 0.3))
+    if row["debt_ratio"] and row["debt_ratio"] < 60: score += 10
+    elif row["debt_ratio"] and row["debt_ratio"] > 80: score -= 10
+    if row["fcf_ratio"] and row["fcf_ratio"] > 0: score += 10
+    if row["pe_percentile"] and row["pe_percentile"] < 40: score += 5
+    return max(10.0, min(85.0, score)), 0.3
+
+
+def _load_vol_price(conn, codes):
+    """Load 5-day volume + price + MA data."""
+    if not codes: return {}, {}, {}
+    ph = ",".join("?" * len(codes))
+    vol_price = defaultdict(list)
+    all_closes = defaultdict(list)
+    avg_vol = {}
+    for r in conn.execute(f"SELECT ts_code, amount, close FROM daily_quotes WHERE ts_code IN ({ph}) ORDER BY ts_code, trade_date DESC", codes).fetchall():
+        if len(vol_price[r["ts_code"]]) < 5: vol_price[r["ts_code"]].append((r["amount"], r["close"]))
+    for r in conn.execute(f"SELECT ts_code, AVG(amount) as avg_amt FROM daily_quotes WHERE ts_code IN ({ph}) AND trade_date >= date('now','-25 days') GROUP BY ts_code", codes).fetchall():
+        avg_vol[r["ts_code"]] = r["avg_amt"] or 0
+    for r in conn.execute(f"SELECT ts_code, close FROM daily_quotes WHERE ts_code IN ({ph}) ORDER BY ts_code, trade_date DESC", codes).fetchall():
+        if len(all_closes[r["ts_code"]]) < 65: all_closes[r["ts_code"]].append(r["close"])
+    ma_data = {}
+    for code, closes in all_closes.items():
+        closes.reverse(); n = len(closes)
+        up_days = sum(1 for i in range(max(1, n-10), n) if closes[i] > closes[i-1]) if n >= 11 else 5
+        up_ratio = up_days / min(10, max(1, n-1))
+        ma_data[code] = {
+            "ma5": sum(closes[-5:]) / 5 if n >= 5 else None,
+            "ma10": sum(closes[-10:]) / 10 if n >= 10 else None,
+            "ma20": sum(closes[-20:]) / 20 if n >= 20 else None,
+            "ma60": sum(closes[-60:]) / 60 if n >= 60 else None,
+            "up_day_ratio": round(up_ratio, 2),
+        }
+    result = {}
+    for code, entries in vol_price.items():
+        entries.reverse(); padded = []
+        for i, (amt, close) in enumerate(entries):
+            padded.append((amt, close, entries[i-1][1] if i > 0 else None))
+        result[code] = padded
+    return result, avg_vol, ma_data
 
 
 # ═══════════════════════════════════════════════
@@ -35,571 +235,271 @@ def _clamp(v, lo=0, hi=100):
 # ═══════════════════════════════════════════════
 
 def _direction_structure(d3, d5, d20, d60):
-    """Score 0-100 based on which timeframes are trending up."""
-    s = (1 if d3 > 0 else 0, 1 if d5 > 0 else 0,
-         1 if d20 > 0 else 0, 1 if d60 > 0 else 0)
-
-    if s == (1, 1, 1, 1):   return 95
-    if s == (1, 1, 0, 1):   return 75   # short+long up, mid perturbed
-    if s == (1, 1, 1, 0):   return 70   # broad recovery, long about to confirm
-    if s == (1, 1, 0, 0):   return 60   # short rebound, watch
-    if s == (1, 0, 0, 0):   return 45   # earliest reversal signal
-    if s == (0, 0, 1, 1):   return 40   # long intact, short pullback
-    if s == (1, 0, 1, 1):   return 55   # d3 just flipped, long still strong
-    if s == (0, 0, 0, 1):   return 25   # long-term tail
-    if s == (0, 0, 0, 0):   return 10
+    s = (1 if d3 > 0 else 0, 1 if d5 > 0 else 0, 1 if d20 > 0 else 0, 1 if d60 > 0 else 0)
+    if s == (1, 1, 1, 1): return 95
+    if s == (1, 1, 0, 1): return 75
+    if s == (1, 1, 1, 0): return 70
+    if s == (1, 1, 0, 0): return 60
+    if s == (1, 0, 0, 0): return 45
+    if s == (0, 0, 1, 1): return 40
+    if s == (1, 0, 1, 1): return 55
+    if s == (0, 0, 0, 1): return 25
+    if s == (0, 0, 0, 0): return 10
     return 30
 
 
 def _acceleration_state(accel, accel_prev3):
-    """Score 0-100 based on acceleration value and recent trend.
-    accel_prev3: True if all of the prior 3 days' accel values were ≤ 0.
-    """
-    if accel > 5 and accel_prev3:   return 95   # just flipped positive — early reversal
-    if accel > 5:                   return 55   # sustained acceleration, may be late
-    if accel > 1:                   return 80   # gentle acceleration
-    if accel >= -1:                 return 60   # stable
-    if accel >= -5:                 return 35   # gentle deceleration
-    return 15   # strong deceleration
+    if accel > 5 and accel_prev3: return 95
+    if accel > 5: return 85
+    if accel > 1: return 80
+    if accel >= -1: return 60
+    if accel >= -5: return 35
+    return 15
 
 
 def _ma_alignment(ma5, ma10, ma20, ma60):
-    """Score 0-100 based on MA ordering."""
-    if ma5 is None or ma10 is None or ma20 is None or ma60 is None:
-        return 50
-    if ma5 > ma10 > ma20 > ma60:                        return 85
-    if ma5 > ma10 and ma20 > ma60:                      return 70
-    if ma5 > ma10 and ma60 > ma20 and ma20 > ma5:       return 65
-    if ma5 > ma10 and ma20 < ma60:                      return 55
-    if ma5 < ma10 and ma20 > ma60:                      return 45
-    if ma5 < ma10 and ma20 < ma60 and ma20 > ma5:       return 30
+    if ma5 is None or ma10 is None or ma20 is None or ma60 is None: return 50
+    if ma5 > ma10 > ma20 > ma60: return 85
+    if ma5 > ma10 and ma20 > ma60: return 70
+    if ma5 > ma10 and ma60 > ma20 and ma20 > ma5: return 65
+    if ma5 > ma10 and ma20 < ma60: return 55
+    if ma5 < ma10 and ma20 > ma60: return 45
+    if ma5 < ma10 and ma20 < ma60 and ma20 > ma5: return 30
     return 20
 
 
 def _trend_quality(r, accel_prev3, ma=None):
-    """0-100: How sustainable is this stock's uptrend?"""
-    d3  = r.get("momentum_d3") or 0
-    d5  = r.get("momentum_d5") or 0
-    d20 = r.get("momentum_d20") or 0
-    d60 = r.get("momentum_d60") or 0
-    accel = r.get("momentum_accel") or 0
-    ma = ma or {}
-
-    direction   = _direction_structure(d3, d5, d20, d60)
+    d3 = r.get("momentum_d3") or 0; d5 = r.get("momentum_d5") or 0
+    d20 = r.get("momentum_d20") or 0; d60 = r.get("momentum_d60") or 0
+    accel = r.get("momentum_accel") or 0; ma = ma or {}
+    direction = _direction_structure(d3, d5, d20, d60)
     acceleration = _acceleration_state(accel, accel_prev3)
-    ma_score    = _ma_alignment(ma.get("ma5"), ma.get("ma10"), ma.get("ma20"), ma.get("ma60"))
+    ma_score = _ma_alignment(ma.get("ma5"), ma.get("ma10"), ma.get("ma20"), ma.get("ma60"))
     consistency = _clamp(ma.get("up_day_ratio", 0.5) * 100, 0, 100)
-
     return direction * 0.30 + acceleration * 0.35 + ma_score * 0.15 + consistency * 0.20
 
 
 def _buy_sell_ratio(vol_price):
-    """0-100: Avg volume on up-days / avg volume on down-days."""
     up_vols, dn_vols = [], []
     for amt, close, prev_close in vol_price:
-        if prev_close is None or prev_close == 0:
-            continue
-        if close > prev_close:
-            up_vols.append(amt)
-        elif close < prev_close:
-            dn_vols.append(amt)
-    if not up_vols and not dn_vols:
-        return 50
-    if not dn_vols:
-        return 90
-    if not up_vols:
-        return 15
-    up_avg = sum(up_vols) / len(up_vols)
-    dn_avg = sum(dn_vols) / len(dn_vols)
+        if prev_close is None or prev_close == 0: continue
+        if close > prev_close: up_vols.append(amt)
+        elif close < prev_close: dn_vols.append(amt)
+    if not up_vols and not dn_vols: return 50
+    if not dn_vols: return 90
+    if not up_vols: return 15
+    up_avg = sum(up_vols) / len(up_vols); dn_avg = sum(dn_vols) / len(dn_vols)
     ratio = up_avg / dn_avg if dn_avg > 0 else 1.5
-    if ratio > 1.5:       return 90
-    if ratio >= 1.2:      return 75
-    if ratio >= 0.8:      return 50
-    if ratio >= 0.6:      return 30
+    if ratio > 1.5: return 90
+    if ratio >= 1.2: return 75
+    if ratio >= 0.8: return 50
+    if ratio >= 0.6: return 30
     return 15
 
 
 def _volume_pattern(vol_price, avg_vol):
-    """0-100: Best-matching 5-day price-volume pattern."""
-    if len(vol_price) < 5:
-        return 50
-
-    amts     = [v[0] for v in vol_price]
-    closes   = [v[1] for v in vol_price]
-    avg20 = 1  # safe default
-    if avg_vol and avg_vol > 0:
-        avg20 = avg_vol
-    elif amts:
-        vsum = sum(amts)
-        avg20 = (vsum / len(amts)) if vsum > 0 else 1
-
-    vol_ratio = [a / avg20 for a in amts]  # 1.0 = at average
-
-    # Recent 3-day volume trends
-    v3 = vol_ratio[-3:]
+    if len(vol_price) < 5: return 50
+    amts = [v[0] for v in vol_price]; closes = [v[1] for v in vol_price]
+    avg20 = avg_vol if avg_vol and avg_vol > 0 else ((sum(amts) / len(amts)) if amts and sum(amts) > 0 else 1)
+    vol_ratio = [a / avg20 for a in amts]; v3 = vol_ratio[-3:]
     p_chg_5d = (closes[-1] / closes[0] - 1) * 100 if closes[0] > 0 else 0
     p_chg_1d = (closes[-1] / closes[-2] - 1) * 100 if len(closes) >= 2 and closes[-2] > 0 else 0
-
-    # 缩量回调后放量反弹 (90)
-    if len(closes) >= 3:
-        mid_lo = closes[-3]
-        if closes[-2] < mid_lo and v3[0] < 1.0 and v3[1] < 1.0 and v3[2] > 1.0 and closes[-1] > closes[-2]:
-            return 90
-
-    # 缩量涨停/一字板 (85)
-    if p_chg_1d > 9 and max(v3) < 1.2 and vol_ratio[-1] < 1.5:
-        return 85
-
-    # 持续放量上涨 + 缩量回调 (85)
-    if p_chg_5d > 0 and vol_ratio[0] > 1.0 and vol_ratio[-1] < vol_ratio[0] and p_chg_1d < 0:
-        return 85
-
-    # 缩量缓慢爬升 (80)
-    if p_chg_5d > 0 and max(vol_ratio) < 1.0 and p_chg_5d < 8:
-        return 80
-
-    # 放量突破 + 缩量整固 (80)
-    if max(vol_ratio) > 1.5 and vol_ratio[-1] < 1.0 and abs(p_chg_5d) < 5:
-        return 80
-
-    # 放量上涨 + 量平价升 (70)
-    if p_chg_5d > 0 and vol_ratio[-1] >= 0.8:
-        return 70
-
-    # 横盘 + 量平 (50)
-    if abs(p_chg_5d) < 3 and max(vol_ratio) < 1.3 and min(vol_ratio) > 0.7:
-        return 50
-
-    # 放量滞涨 (20)
-    if max(vol_ratio) > 1.3 and abs(p_chg_5d) < 2:
-        return 20
-
-    # 放量下跌 + 缩量反弹 (25)
-    if p_chg_5d < -3 and vol_ratio[0] > 1.2 and max(vol_ratio[-2:]) < 0.8:
-        return 25
-
-    # 放量长阴 (15)
-    if p_chg_1d < -5 and vol_ratio[-1] > 1.5:
-        return 15
-
-    # 缩量阴跌 (30)
-    if p_chg_5d < 0 and max(vol_ratio) < 1.0:
-        return 30
-
+    if len(closes) >= 3 and closes[-2] < closes[-3] and v3[0] < 1.0 and v3[1] < 1.0 and v3[2] > 1.0 and closes[-1] > closes[-2]: return 90
+    if p_chg_1d > 9 and max(v3) < 1.2 and vol_ratio[-1] < 1.5: return 85
+    if p_chg_5d > 0 and vol_ratio[0] > 1.0 and vol_ratio[-1] < vol_ratio[0] and p_chg_1d < 0: return 85
+    if p_chg_5d > 0 and max(vol_ratio) < 1.0 and p_chg_5d < 8: return 80
+    if max(vol_ratio) > 1.5 and vol_ratio[-1] < 1.0 and abs(p_chg_5d) < 5: return 80
+    if p_chg_5d > 0 and vol_ratio[-1] >= 0.8: return 70
+    if abs(p_chg_5d) < 3 and max(vol_ratio) < 1.3 and min(vol_ratio) > 0.7: return 50
+    if max(vol_ratio) > 1.3 and abs(p_chg_5d) < 2: return 20
+    if p_chg_5d < -3 and vol_ratio[0] > 1.2 and max(vol_ratio[-2:]) < 0.8: return 25
+    if p_chg_1d < -5 and vol_ratio[-1] > 1.5: return 15
+    if p_chg_5d < 0 and max(vol_ratio) < 1.0: return 30
     return 50
 
 
 def _price_efficiency(vol_price, avg_vol):
-    """0-100: How much price movement per unit of volume?"""
-    if not vol_price or not avg_vol or avg_vol <= 0:
-        return 50
-    amts   = [v[0] for v in vol_price]
-    closes = [v[1] for v in vol_price]
-    if len(closes) < 2:
-        return 50
+    if not vol_price or not avg_vol or avg_vol <= 0: return 50
+    amts = [v[0] for v in vol_price]; closes = [v[1] for v in vol_price]
+    if len(closes) < 2: return 50
     daily_ret = [abs(closes[i] / closes[i-1] - 1) * 100 for i in range(1, len(closes))]
     avg_ret = sum(daily_ret) / len(daily_ret)
     avg_vol_ratio = (sum(amts) / len(amts)) / avg_vol
-    if avg_vol_ratio <= 0:
-        return 50
+    if avg_vol_ratio <= 0: return 50
     efficiency = avg_ret / avg_vol_ratio
-    if efficiency > 1.5:    return 85
-    if efficiency >= 0.7:   return 60
+    if efficiency > 1.5: return 85
+    if efficiency >= 0.7: return 60
     return 25
 
 
 def _volume_quality(vol_price, avg_vol):
-    """0-100: Price-volume relationship quality."""
-    if not vol_price:
-        return 50
-    a = _buy_sell_ratio(vol_price)
-    b = _volume_pattern(vol_price, avg_vol)
-    c = _price_efficiency(vol_price, avg_vol)
-    return a * 0.45 + b * 0.35 + c * 0.20
+    if not vol_price: return 50
+    return _buy_sell_ratio(vol_price) * 0.45 + _volume_pattern(vol_price, avg_vol) * 0.35 + _price_efficiency(vol_price, avg_vol) * 0.20
 
 
 def _short_momentum(r):
-    """0-100: Short-term momentum from d3/d5/d20."""
-    d3  = r.get("momentum_d3") or 0
-    d5  = r.get("momentum_d5") or 0
-    d20 = r.get("momentum_d20") or 0
-    raw = d3 * 0.40 + d5 * 0.35 + d20 * 0.25
-    return _clamp(50 + math.tanh(raw / 15) * 50)
+    d3 = r.get("momentum_d3") or 0; d5 = r.get("momentum_d5") or 0; d20 = r.get("momentum_d20") or 0
+    return _clamp(50 + math.tanh((d3 * 0.40 + d5 * 0.35 + d20 * 0.25) / 15) * 50)
 
 
-def _fundamental_score_v(a2):
-    """0-100: Fundamental quality (for value_score)."""
-    if not a2:
-        return 25
-    fh  = a2.get("financial_health", {}).get("rating", "?") if isinstance(a2.get("financial_health"), dict) else "?"
-    eq  = a2.get("earnings_quality", {}).get("rating", "?") if isinstance(a2.get("earnings_quality"), dict) else "?"
-    gq  = a2.get("growth_quality", {}).get("rating", "?") if isinstance(a2.get("growth_quality"), dict) else "?"
-    val = a2.get("valuation", {}).get("rating", "?") if isinstance(a2.get("valuation"), dict) else "?"
-    rfs = len(a2.get("red_flags", []))
-
-    base = {"GOOD": 85, "MEDIUM": 70, "UNKNOWN": 40}.get(fh, 15)
-    if eq == "HIGH":    base += 10
-    elif eq == "LOW":   base -= 10
-    if gq == "HIGH":    base += 5
-    if val == "GOOD" or (isinstance(val, str) and ("FAIR" in val.upper() or "UNDER" in val.upper())):
-        base += 5
-    elif val == "OVERPRICED":
-        base -= 15
-    base -= min(40, rfs * 8)
-    return _clamp(base)
+def _direction_health(d3, d5, d20, d60):
+    """0-100: Trend health. Sustained uptrend = strong positive. Only truly parabolic or dead-cat penalized."""
+    if d60 > 0 and d3 > 0:
+        base = 75 if d5 <= 0 else 70  # d5 still negative = pullback recovery, higher value
+    elif d60 > 0 and d5 > 0: base = 60
+    elif d60 > 0: base = 45
+    elif d3 > 0 and d5 > 0: base = 60
+    elif d3 > 0: base = 30
+    else: base = 10
+    # Sustained bonus (d3/d5 already in base score, not double-counted)
+    if d20 > 0 and d5 > 0: sustained = 15
+    elif d20 > 0: sustained = 10
+    else: sustained = 0
+    # Declining penalty
+    declining = 30 if (d20 < 0 and d60 < 0) else (10 if (d20 < 0 and d3 <= 0) else 0)
+    return _clamp(base + sustained - declining)
 
 
-def _valuation_score_v(a2):
-    """0-100: Standalone valuation rating."""
-    if not a2:
-        return 50
-    val = a2.get("valuation", {}).get("rating", "?") if isinstance(a2.get("valuation"), dict) else "?"
-    v = str(val).upper()
-    if "UNDER" in v:    return 95
-    if "FAIR" in v:     return 80
-    if "GOOD" in v:     return 70
-    if "OVER" in v:     return 30
-    return 50
-
-
-def _fundamental_floor_v(a2):
-    """0-100: Minimal quality check (for hot_picks). High unless truly bad."""
-    if not a2:
-        return 80
-    fh = a2.get("financial_health", {}).get("rating", "?") if isinstance(a2.get("financial_health"), dict) else "?"
-    eq = a2.get("earnings_quality", {}).get("rating", "?") if isinstance(a2.get("earnings_quality"), dict) else "?"
-    rfs = len(a2.get("red_flags", []))
-    if fh == "POOR" and eq == "LOW":
-        return 25
-    if fh == "POOR":
-        return 50
-    if rfs >= 3:
-        return 35
-    return 80
+def _early_momentum_score(r, vol_price, avg_vol, accel_prev3):
+    """0-100: Early-stage momentum for hot_picks. Rewards acceleration + volume + trend health."""
+    accel = r.get("momentum_accel") or 0; d3 = r.get("momentum_d3") or 0
+    d5 = r.get("momentum_d5") or 0; d20 = r.get("momentum_d20") or 0
+    d60 = r.get("momentum_d60") or 0
+    accel_q = _acceleration_state(accel, accel_prev3)
+    vol_q = _volume_quality(vol_price, avg_vol)
+    dir_q = _direction_health(d3, d5, d20, d60)
+    return accel_q * 0.40 + vol_q * 0.35 + dir_q * 0.25
 
 
 # ═══════════════════════════════════════════════
-# Top-level scoring functions
+# Main rebuild
 # ═══════════════════════════════════════════════
-
-def compute_value_score(r, a2, vol_price, avg_vol, accel_prev3, ma=None):
-    """0-100: Value-investing conviction (long_term FL)."""
-    has_a2 = a2 is not None
-    momentum    = r.get("momentum") or 50
-    trend       = _trend_quality(r, accel_prev3, ma)
-    vol         = _volume_quality(vol_price, avg_vol)
-
-    if has_a2:
-        fund = _fundamental_score_v(a2)
-        valv = _valuation_score_v(a2)
-        return fund * 0.40 + trend * 0.35 + momentum * 0.15 + valv * 0.10
-    else:
-        return trend * 0.50 + vol * 0.25 + momentum * 0.25
-
-
-def compute_momentum_score(r, a2, vol_price, avg_vol):
-    """0-100: Short-term momentum conviction (hot_picks FL)."""
-    has_a2 = a2 is not None
-    short   = _short_momentum(r)
-    vol     = _volume_quality(vol_price, avg_vol)
-
-    if has_a2:
-        floor = _fundamental_floor_v(a2)
-        return short * 0.45 + vol * 0.35 + floor * 0.20
-    else:
-        return short * 0.50 + vol * 0.50
-
-
-# ═══════════════════════════════════════════════
-# Tier label
-# ═══════════════════════════════════════════════
-
-def _value_tier(score):
-    if score >= 70: return "价值优选"
-    if score >= 50: return "价值关注"
-    return "一般关注"
-
-
-def _momentum_tier(score):
-    if score >= 70: return "动能热点"
-    if score >= 50: return "动能追踪"
-    return "一般关注"
-
-
-# ═══════════════════════════════════════════════
-# Legacy classifier (preserved for reference; not used in FL selection)
-# ═══════════════════════════════════════════════
-def classify_stock(r, a2_report=None, momentum_d3=None, momentum_d5=None, momentum_d20=None,
-                   p80=None, p60=None, p50=None, p40=None, p30=None):
-    """Return list of matching categories (multi-label). Strategy-specific views, not mutually exclusive.
-
-    A stock can be both 稳健型 (for long_term) AND 动量型 (for hot_picks) simultaneously.
-    """
-    has_a2 = r.get("has_a2") == 1 and a2_report is not None
-    momentum = r.get("momentum") or 50
-    total_score = r.get("total_score") or 40
-    fund_score = r.get("fundamental_score") or 40
-
-    # Percentile-based thresholds, fallback to hardcoded defaults
-    mp80 = p80 if p80 is not None else 85
-    mp60 = p60 if p60 is not None else 65
-    mp50 = p50 if p50 is not None else 55
-    mp40 = p40 if p40 is not None else 50
-    mp30 = p30 if p30 is not None else 40
-
-    # ── Parse A2 quality ──
-    eq = "?"; gq = "?"; fh = "?"; val = "?"; rfs = 0
-    if a2_report:
-        eq = (a2_report.get("earnings_quality") or {}).get("rating", "?") if isinstance(a2_report.get("earnings_quality"), dict) else "?"
-        gq = (a2_report.get("growth_quality") or {}).get("rating", "?") if isinstance(a2_report.get("growth_quality"), dict) else "?"
-        fh = (a2_report.get("financial_health") or {}).get("rating", "?") if isinstance(a2_report.get("financial_health"), dict) else "?"
-        val = (a2_report.get("valuation") or {}).get("rating", "?") if isinstance(a2_report.get("valuation"), dict) else "?"
-        rfs = len(a2_report.get("red_flags", []))
-
-    d3 = momentum_d3 or 0; d5 = momentum_d5 or 0; d20 = momentum_d20 or 0
-
-    # ── Hard gate: too many red flags → 观望型 only ──
-    if rfs >= 5:
-        return ["观望型"]
-    # eq=LOW+fh=POOR no longer hard-gated — A7 LLM has discretion to include with rationale
-
-    tags = set()
-
-    # ── Long-term categories ──
-    # 价值型: good health, reasonable valuation, moderate flags, momentum ≥ p40
-    if fh == "GOOD" and val not in ("OVERPRICED", "?") and rfs <= 2 and momentum >= mp40:
-        tags.add("价值型")
-
-    # 成长型: high growth OR high earnings quality, reasonable valuation, momentum ≥ p50
-    if (gq == "HIGH" or eq == "HIGH") and val != "OVERPRICED" and rfs <= 1 and momentum >= mp50:
-        tags.add("成长型")
-
-    # 稳健型: not poor health, known fh, momentum ≥ p30, rfs ≤ 2
-    if fh != "POOR" and fh != "?" and momentum >= mp30 and rfs <= 2:
-        tags.add("稳健型")
-
-    # ── Hot-picks categories ──
-    # 动量型: strong momentum, quality floor
-    if momentum >= mp80 and eq != "LOW":
-        tags.add("动量型")
-
-    # 突破型: moderate momentum, quality floor
-    if momentum >= mp60 and eq != "LOW" and rfs <= 3:
-        tags.add("突破型")
-
-    # 短期交易型: multi-timeframe momentum positive, fundamentals not terrible
-    if d3 > 0 and d5 > 0 and d20 > 0:
-        if fund_score >= 30 or not has_a2:
-            tags.add("短期交易型")
-
-    # ── Fallbacks if nothing matched ──
-    if not tags:
-        if has_a2 and fh != "POOR" and fh != "?":
-            tags.add("稳健型")
-        elif has_a2 and momentum >= mp60 and eq != "LOW":
-            tags.add("动量型")
-        elif not has_a2 and d3 > 0 and d5 > 0:
-            tags.add("短期交易型")
-        else:
-            tags.add("观望型")
-
-    return sorted(tags)
-
-
-def _load_vol_price(conn, codes):
-    """Load 5-day volume + price + MA data per code for FL scoring."""
-    if not codes:
-        return {}, {}, {}
-    ph = ",".join("?" * len(codes))
-    vol_price = defaultdict(list)
-    all_closes = defaultdict(list)
-    avg_vol = {}
-    # Last 5 trading days per code (for volume analysis)
-    for r in conn.execute(
-        f"SELECT ts_code, amount, close FROM daily_quotes "
-        f"WHERE ts_code IN ({ph}) ORDER BY ts_code, trade_date DESC",
-        codes
-    ).fetchall():
-        if len(vol_price[r["ts_code"]]) < 5:
-            vol_price[r["ts_code"]].append((r["amount"], r["close"]))
-    # 20-day average volume
-    for r in conn.execute(
-        f"SELECT ts_code, AVG(amount) as avg_amt FROM daily_quotes "
-        f"WHERE ts_code IN ({ph}) AND trade_date >= date('now','-25 days') "
-        f"GROUP BY ts_code", codes
-    ).fetchall():
-        avg_vol[r["ts_code"]] = r["avg_amt"] or 0
-    # MA data: close history for MA5/MA10/MA20/MA60 (up to 65 days)
-    for r in conn.execute(
-        f"SELECT ts_code, close FROM daily_quotes "
-        f"WHERE ts_code IN ({ph}) ORDER BY ts_code, trade_date DESC",
-        codes
-    ).fetchall():
-        if len(all_closes[r["ts_code"]]) < 65:
-            all_closes[r["ts_code"]].append(r["close"])
-    ma_data = {}
-    for code, closes in all_closes.items():
-        closes.reverse()  # oldest first
-        n = len(closes)
-        up_days = sum(1 for i in range(max(1, n-10), n) if closes[i] > closes[i-1]) if n >= 11 else 5
-        up_ratio = up_days / min(10, max(1, n-1))
-        ma_data[code] = {
-            "ma5":  sum(closes[-5:]) / 5 if n >= 5 else None,
-            "ma10": sum(closes[-10:]) / 10 if n >= 10 else None,
-            "ma20": sum(closes[-20:]) / 20 if n >= 20 else None,
-            "ma60": sum(closes[-60:]) / 60 if n >= 60 else None,
-            "up_day_ratio": round(up_ratio, 2),
-        }
-    # Reverse to chronological order, build prev_close
-    result = {}
-    for code, entries in vol_price.items():
-        entries.reverse()  # oldest first
-        padded = []
-        for i, (amt, close) in enumerate(entries):
-            prev = entries[i-1][1] if i > 0 else None
-            padded.append((amt, close, prev))
-        result[code] = padded
-    return result, avg_vol, ma_data
-
 
 def rebuild(strategy="long_term"):
-    """Rebuild focus list with dual independent scoring.
-
-    long_term → top N by value_score
-    hot_picks  → top N by momentum_score
-    """
+    """Rebuild focus list with gate + dual-path selection."""
     conn = get_connection()
     try:
+        trade_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        # Step 1: A0 pool
         tiers = ("'HOLDING'", "'FAVORED'", "'NEUTRAL'")
-
-        rows = conn.execute(f"""
-            SELECT s.ts_code, s.name,
-                   cs.total_score, cs.rank, t.tier, t.confidence,
-                   cs.momentum, cs.fundamental_score, cs.tech_score,
-                   cs.trend_type, cs.momentum_d3, cs.momentum_d5, cs.momentum_d20,
-                   cs.momentum_d60, cs.momentum_accel,
-                   CASE WHEN fr.ts_code IS NOT NULL THEN 1 ELSE 0 END as has_a2
-            FROM stocks s
-            JOIN tier_assignments t ON s.ts_code = t.ts_code AND t.tier IN ({','.join(tiers)})
-            JOIN composite_scores cs ON s.ts_code = cs.ts_code
-                AND cs.calc_date = (SELECT MAX(calc_date) FROM composite_scores WHERE strategy=?)
-                AND cs.strategy = ?
-            LEFT JOIN fundamental_reports fr ON s.ts_code = fr.ts_code
-            WHERE cs.total_score IS NOT NULL
-            GROUP BY s.ts_code
-        """, (strategy, strategy)).fetchall()
-
-        if not rows:
-            logger.warning("No scored stocks found")
-            return []
-
-        if len(rows) < 2:
-            logger.warning("Not enough scored stocks")
-            return []
-
-        # ── Load A2 ──
+        rows = conn.execute(f"SELECT s.ts_code, s.name, t.tier FROM stocks s JOIN tier_assignments t ON s.ts_code=t.ts_code WHERE t.tier IN ({','.join(tiers)})").fetchall()
+        if not rows: logger.warning("No stocks in A0 pool"); return []
+        target_codes = [r["ts_code"] for r in rows]; name_map = {r["ts_code"]: r["name"] for r in rows}
+        logger.info(f"FL [{strategy}]: {len(target_codes)} stocks in A0 pool")
+        # Step 2: A1 indicators
+        ph_all = ",".join("?" * len(target_codes))
+        tech_scores = {}
+        for r in conn.execute(f"SELECT ts_code, indicators_json FROM indicators WHERE ts_code IN ({ph_all}) AND calc_date = (SELECT MAX(calc_date) FROM indicators)", target_codes).fetchall():
+            try: tech_scores[r["ts_code"]] = _compute_tech_score(json.loads(r["indicators_json"]), strategy)
+            except: tech_scores[r["ts_code"]] = 50.0
+        # Step 3: A2 reports
         a2_cache = {}
-        all_codes = [r["ts_code"] for r in rows]
-        ph_all = ",".join("?" * len(all_codes))
-        for r2 in conn.execute(
-            f"SELECT ts_code, report_json FROM fundamental_reports WHERE ts_code IN ({ph_all})",
-            all_codes
-        ).fetchall():
-            try:
-                a2_cache[r2["ts_code"]] = json.loads(r2["report_json"])
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # ── Load volume + MA data ──
-        vol_price, avg_vol, ma_data = _load_vol_price(conn, all_codes)
-
-        # ── Compute accel_prev3 (per-stock: were prior 3 accel values ≤ 0?) ──
-        # Approximate: if momentum_d3 just turned positive recently
-        # Use d3>0 with d20 or d60 negative as proxy for "acceleration just flipped"
-        accel_prev3 = {}
-        for r in rows:
-            code = r["ts_code"]
-            d3 = r["momentum_d3"] or 0
-            d20 = r["momentum_d20"] or 0
-            d60 = r["momentum_d60"] or 0
-            accel = r["momentum_accel"] or 0
-            # accel_prev3 = True if momentum was recently negative (early reversal indicator)
-            accel_prev3[code] = (accel > 0) and (d3 > 0) and (d20 <= 0 or d60 <= 0)
-
-        # ── Score all stocks ──
-        scored = []
-        skipped_zero_vol = []
-        for r in rows:
-            rd = dict(r)
-            code = rd["ts_code"]
-            a2 = a2_cache.get(code)
-            vp = vol_price.get(code, [])
-            av = avg_vol.get(code, 0)
-
-            # Skip stocks with no daily price/volume data (e.g. 920xxx 北交所)
-            if not vp or (av <= 0 and all(a == 0 for a, _, _ in vp)):
-                skipped_zero_vol.append(code)
-                continue
-
-            md = ma_data.get(code, {})
-            vs = compute_value_score(rd, a2, vp, av, accel_prev3.get(code, False), md)
-            ms = compute_momentum_score(rd, a2, vp, av)
-            rd["value_score"] = vs
-            rd["momentum_score"] = ms
-            scored.append(rd)
-
-        # ── Strategy-specific top-N selection ──
-        if strategy == "long_term":
-            base_pct = 0.35
-            scored.sort(key=lambda r: -r["value_score"])
-        else:
-            base_pct = 0.35
-            scored.sort(key=lambda r: -r["momentum_score"])
-
-        # Regime multiplier
-        try:
-            mr = conn.execute(
-                "SELECT regime FROM macro_regime ORDER BY calc_date DESC LIMIT 1"
-            ).fetchone()
-            regime = mr["regime"] if mr else ""
-            if "熊市" in str(regime) or "BEAR" in str(regime).upper():
-                top_pct = base_pct * 0.60
-            elif "牛市" in str(regime) or "BULL" in str(regime).upper():
-                top_pct = base_pct * 1.00
+        for r in conn.execute(f"SELECT ts_code, report_json FROM fundamental_reports WHERE ts_code IN ({ph_all}) AND calc_date = (SELECT MAX(calc_date) FROM fundamental_reports fr2 WHERE fr2.ts_code = fundamental_reports.ts_code)", target_codes).fetchall():
+            try: a2_cache[r["ts_code"]] = json.loads(r["report_json"])
+            except: pass
+        # Step 4: momentum
+        momentum_data = calc_momentum(conn, target_codes)
+        trend_types = classify_trend_type(momentum_data)
+        # Step 5: volume/MA
+        vol_price, avg_vol, ma_data = _load_vol_price(conn, target_codes)
+        # Step 6: per-stock scoring + gates
+        rejected = []; passing = []; skipped = []
+        for code in target_codes:
+            a2 = a2_cache.get(code); vp = vol_price.get(code, []); av = avg_vol.get(code, 0)
+            m = momentum_data.get(code, {}); m_raw = m.get("raw", {}) if m else {}
+            tt = trend_types.get(code, "declining"); md = ma_data.get(code, {})
+            if not vp or (av <= 0 and all(a == 0 for a, _, _ in vp)): skipped.append(code); continue
+            # Compute scores
+            vol_q = _volume_quality(vp, av)
+            short_mom = _short_momentum({"momentum_d3": m_raw.get("d3", 0), "momentum_d5": m_raw.get("d5", 0), "momentum_d20": m_raw.get("d20", 0)})
+            md_fields = {"momentum_d3": m_raw.get("d3", 0), "momentum_d5": m_raw.get("d5", 0), "momentum_d20": m_raw.get("d20", 0), "momentum_d60": m_raw.get("d60", 0), "momentum_accel": m.get("acceleration", 0)}
+            trend_q = _trend_quality(md_fields, (m.get("acceleration", 0) or 0) > 0 and (m_raw.get("d3", 0) or 0) > 0 and ((m_raw.get("d5", 0) or 0) <= 0 or (m_raw.get("d20", 0) or 0) <= 0 or (m_raw.get("d60", 0) or 0) <= 0), md)
+            early_mom = _early_momentum_score(md_fields, vp, av, (m.get("acceleration", 0) or 0) > 0 and (m_raw.get("d3", 0) or 0) > 0 and ((m_raw.get("d5", 0) or 0) <= 0 or (m_raw.get("d20", 0) or 0) <= 0 or (m_raw.get("d60", 0) or 0) <= 0))
+            # Fundamental score
+            fund_from_fallback = False
+            if a2 is not None:
+                fund_score = a2.get("fundamental_score"); fund_conf = a2.get("confidence", 0.3)
+                if fund_score is None: fund_score, fund_conf = _fundamental_fallback(conn, code); fund_from_fallback = True
+            else: fund_score, fund_conf = _fundamental_fallback(conn, code); fund_from_fallback = True
+            # Gates
+            if strategy == "hot_picks":
+                passed, gate_reason = _gate_hot_picks(a2, vol_q, m_raw.get("d3", 0), m_raw.get("d5", 0), m_raw.get("d60", 0))
             else:
-                top_pct = base_pct * 0.80
-        except Exception:
-            top_pct = base_pct
+                passed, gate_reason = _gate_long_term(a2, m_raw.get("d20", 0), m_raw.get("d60", 0))
+            if not passed: rejected.append({"ts_code": code, "reason": gate_reason}); continue
+            has_a2 = a2 is not None
+            passing.append({"ts_code": code, "name": name_map.get(code, "?"), "has_a2": has_a2,
+                "short_momentum": short_mom, "early_momentum": early_mom, "vol_quality": vol_q,
+                "trend_quality": trend_q, "fund_score": fund_score, "fund_conf": fund_conf,
+                "fund_from_fallback": fund_from_fallback, "trend_type": tt,
+                "tech_score": tech_scores.get(code, 50), "momentum_raw": m_raw,
+                "momentum_accel": m.get("acceleration"), "ma_data": md, "source_path": ""})
 
-        top_n = max(15, int(len(scored) * top_pct))
-        selected = [s for s in scored[:top_n] if (s.get("total_score") or 0) >= MIN_TOTAL_SCORE]
-
-        # ── Log ──
-        if skipped_zero_vol:
-            logger.info(f"Focus list [{strategy}]: skipped {len(skipped_zero_vol)} no-price-data stocks: {', '.join(skipped_zero_vol[:10])}{'...' if len(skipped_zero_vol) > 10 else ''}")
-
-        if strategy == "long_term":
-            avg_vs = sum(s["value_score"] for s in selected) / len(selected) if selected else 0
-            logger.info(f"Focus list [{strategy}]: {len(selected)} selected, avg value_score={avg_vs:.1f}")
+        # Step 7: Dual-path selection
+        if strategy == "hot_picks":
+            # Path 1: 早起上涨 (80) — early_momentum
+            early_ranking = sorted(passing, key=lambda s: -s["early_momentum"])
+            early_picks = {s["ts_code"]: s for s in early_ranking[:80]}
+            for s in early_picks.values(): s["source_path"] = "早起上涨"
+            # Path 2: 持续上涨 (40) — d5>0 AND d60>0
+            sustained_pool = [s for s in passing if (s["momentum_raw"].get("d5", 0) or 0) > 0 and (s["momentum_raw"].get("d60", 0) or 0) > 0]
+            sustained_ranking = sorted(sustained_pool, key=lambda s: -(s["short_momentum"] * 0.5 + s["vol_quality"] * 0.5))
+            sustained_picks = {s["ts_code"]: s for s in sustained_ranking[:40]}
+            for s in sustained_picks.values(): s["source_path"] = "持续上涨" if s["ts_code"] not in early_picks else "双路径"
+            # Union
+            fl_picks = early_picks.copy()
+            for code, s in sustained_picks.items():
+                if code not in fl_picks: fl_picks[code] = s
+            if len(fl_picks) < 120:
+                for s in sustained_ranking:
+                    if len(fl_picks) >= 120: break
+                    if s["ts_code"] not in fl_picks: s["source_path"] = "持续上涨"; fl_picks[s["ts_code"]] = s
+            # A2 path
+            a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"] and s["short_momentum"] >= 50]
+            a2_ranking = sorted(a2_eligible, key=lambda s: -s["fund_score"])
+            a2_picks = {s["ts_code"]: s for s in a2_ranking[:80]}
+            for s in a2_picks.values(): s["source_path"] = "A2基本面排名" if s["ts_code"] not in fl_picks else "双路径"
         else:
-            avg_ms = sum(s["momentum_score"] for s in selected) / len(selected) if selected else 0
-            logger.info(f"Focus list [{strategy}]: {len(selected)} selected, avg momentum_score={avg_ms:.1f}")
+            # long_term: A2 (120) + FL trend_quality (80)
+            a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"]]
+            a2_ranking = sorted(a2_eligible, key=lambda s: -s["fund_score"])
+            a2_picks = {s["ts_code"]: s for s in a2_ranking[:120]}
+            for s in a2_picks.values(): s["source_path"] = "A2基本面排名"
+            fl_ranking = sorted(passing, key=lambda s: -s["trend_quality"])
+            fl_picks = {s["ts_code"]: s for s in fl_ranking[:80]}
+            for s in fl_picks.values(): s["source_path"] = "FL技术排名" if s["ts_code"] not in a2_picks else "双路径"
 
-        # ── Persist ──
-        trade_date = datetime.now().strftime("%Y-%m-%d")
+        # Union
+        selected_codes = set(fl_picks.keys()) | set(a2_picks.keys())
+        selected = [s for s in passing if s["ts_code"] in selected_codes]
+
+        # Log
+        gate_reject_n = len(rejected)
+        from collections import Counter
+        src_counts = Counter(s.get("source_path", "?") for s in selected)
+        dual_n = sum(1 for s in selected if s.get("source_path") == "双路径")
+        logger.info(f"FL [{strategy}]: {len(passing)} passed gates, {gate_reject_n} rejected → final={len(selected)} ({dict(src_counts)})")
+        if gate_reject_n > 0:
+            reason_counts = Counter(r["reason"] for r in rejected)
+            for reason, count in reason_counts.most_common(5):
+                logger.info(f"  Gate reject: {reason} ({count}只)")
+
+        # Step 8: Persist
+        conn.execute("DELETE FROM composite_scores WHERE strategy=? AND calc_date=?", (strategy, trade_date))
         conn.execute("DELETE FROM focus_list WHERE strategy=?", (strategy,))
         for i, s in enumerate(selected):
-            if strategy == "long_term":
-                tier = _value_tier(s["value_score"])
-            else:
-                tier = _momentum_tier(s["momentum_score"])
-            conn.execute(
-                """INSERT INTO focus_list (ts_code, name, total_score, rank, list_date, position, tier, strategy)
-                   VALUES (?,?,?,?,?,?,?,?)""",
-                (s["ts_code"], s["name"],
-                 s["total_score"], s["rank"], trade_date, i + 1,
-                 tier, strategy),
-            )
+            ts_code = s["ts_code"]
+            total_score = s["fund_score"] if strategy == "long_term" else s["early_momentum"]
+            conn.execute("""INSERT OR REPLACE INTO composite_scores (ts_code, calc_date, strategy, tech_score, fundamental_score, macro_fit, momentum, total_score, rank, tier_action, trend_type, momentum_d3, momentum_d5, momentum_d20, momentum_d60, momentum_accel) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (ts_code, trade_date, strategy, round(s["tech_score"], 1), round(s["fund_score"], 1), 0,
+                 composite_momentum_score(s["momentum_raw"], s["trend_type"]) if s["momentum_raw"] else 50,
+                 round(total_score, 1), i + 1, "PROMOTE" if i < len(selected) * 0.2 else "STAY",
+                 s["trend_type"], s["momentum_raw"].get("d3"), s["momentum_raw"].get("d5"),
+                 s["momentum_raw"].get("d20"), s["momentum_raw"].get("d60"), s["momentum_accel"]))
+            tier = "价值优选" if strategy == "long_term" else "动能热点"
+            conn.execute("INSERT INTO focus_list (ts_code, name, total_score, rank, list_date, position, tier, strategy, value_score, momentum_score) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (ts_code, s["name"], round(total_score, 1), i + 1, trade_date[:10], i + 1, tier, strategy,
+                 round(s.get("fund_score", 0), 1), round(s.get("early_momentum", 0), 1)))
         conn.commit()
         return selected
     finally:
@@ -607,20 +507,8 @@ def rebuild(strategy="long_term"):
 
 
 def get_focus_codes(conn, strategy=None):
-    """Return list of ts_code in current focus list, ordered by position.
-
-    Args:
-        strategy: filter by strategy ('long_term' or 'hot_picks').
-                  If None, returns all (legacy behavior).
-    """
     if strategy:
-        rows = conn.execute(
-            "SELECT ts_code, name, total_score, position "
-            "FROM focus_list WHERE strategy=? ORDER BY position",
-            (strategy,),
-        ).fetchall()
+        rows = conn.execute("SELECT ts_code, name, total_score, position, value_score, momentum_score FROM focus_list WHERE strategy=? ORDER BY position", (strategy,)).fetchall()
     else:
-        rows = conn.execute(
-            "SELECT ts_code, name, industry, total_score, position FROM focus_list ORDER BY position"
-        ).fetchall()
+        rows = conn.execute("SELECT ts_code, name, industry, total_score, position, value_score, momentum_score FROM focus_list ORDER BY position").fetchall()
     return [dict(r) for r in rows]

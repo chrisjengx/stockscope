@@ -107,7 +107,6 @@ class Settings:
                 "sell_pass_rate": self.hot_picks_sell_pass_rate,
                 "hold_pass_rate": self.hot_picks_hold_pass_rate,
                 "absolute_veto_score": self.hot_picks_absolute_veto,
-                "factor_weights": {"tech": 0.375, "fundamental": 0.10, "macro_fit": 0.075, "momentum": 0.40, "relative_strength": 0.05},
             }
         return {
             "max_holdings": self.long_term_max_holdings,
@@ -120,7 +119,6 @@ class Settings:
             "sell_pass_rate": self.long_term_sell_pass_rate,
             "hold_pass_rate": self.long_term_hold_pass_rate,
             "absolute_veto_score": self.long_term_absolute_veto,
-            "factor_weights": {"tech": 0.225, "fundamental": 0.40, "macro_fit": 0.075, "momentum": 0.25, "relative_strength": 0.05},
         }
 
 

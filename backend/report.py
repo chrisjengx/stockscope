@@ -133,11 +133,11 @@ def generate_html_report(strategy="long_term", trade_date=None):
 </div>
 """
 
-    # ── A5 Section: Top 50 FL stocks by score (these feed into A7) ──
+    # ── A5 Section: FL Top 50 by strategy score ──
     html += f"""<div class="section">
-<h2>A5 Multi-Factor — Focus List Top 50 by Score</h2>
+<h2>FL Factor Engine — Top 50 by Strategy Score</h2>
 <p class="narrative">{str(fusion.get('overall_narrative',''))[:500]}</p>
-<p>From the {len(fl_rows)}-stock Focus List, sorted by A5 total_score. These are the top-ranked candidates that enter A7.</p>
+<p>From the {len(fl_rows)}-stock Focus List, sorted by FL strategy score (value_score for long_term, momentum_score for hot_picks).</p>
 <table><tr>
 <th>#</th><th>Code</th><th>Name</th><th>Score</th><th>Type</th><th>Cat</th>
 <th>T</th><th>F</th><th>M</th>
@@ -164,7 +164,7 @@ def generate_html_report(strategy="long_term", trade_date=None):
     for cat, n in fl_cats:
         html += f'<div class="stat"><div class="val">{n}</div><div class="lbl">{cat}</div></div>'
     html += """</div>
-<p>The Focus List is the candidate pool that feeds into A7. Stocks are classified by A2 quality + momentum. See A5 Top 50 below for the highest-scored picks.</p>
+<p>The Focus List is the candidate pool that feeds into A7. Stocks are independently scored by the FL Factor Engine (value_score for long_term, momentum_score for hot_picks). See FL Top 50 below for the highest-scored picks.</p>
 </div>"""
 
     # ── A6: gather salvaged REJECTs ──

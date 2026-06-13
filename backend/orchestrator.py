@@ -318,7 +318,7 @@ class Orchestrator:
                 result.stages.append(StageResult(stage=0, agent="Data_Freshness",
                                                 status="OK", error=f"fresh (latest={dq['latest'][:10] if dq else 'none'})"))
 
-            # ═══ Skip early stages for hot_picks: A5 already computed both strategies ═══
+            # ═══ Skip early stages for hot_picks: reuse A0/A1/A3/A4 from long_term ═══
             if skip_early_stages:
                 result.stages.append(StageResult(stage=1, agent="A0_Universe", status="SKIPPED",
                                                  error="hot_picks — A0 skipped"))
@@ -330,15 +330,22 @@ class Orchestrator:
                                                  error="hot_picks — reused from long_term"))
                 result.stages.append(StageResult(stage=2, agent="A4_Macro", status="SKIPPED",
                                                  error="hot_picks — reused from long_term"))
-                result.stages.append(StageResult(stage=3, agent="A5_Fusion", status="SKIPPED",
-                                                 error="hot_picks — computed with long_term A5"))
-                # Rebuild FL for this strategy
+                # Stage 3: FL rebuild for hot_picks (strategy-specific scoring)
                 try:
                     from backend.focus_list import rebuild as rebuild_focus
                     fl = rebuild_focus(strategy=strategy)
-                    logger.info(f"  Focus list [{strategy}]: {len(fl)} stocks")
+                    result.stages.append(StageResult(stage=3, agent="FL_Rebuild", status="OK",
+                                                     error=f"{len(fl)} stocks selected"))
+                    logger.info(f"  FL [{strategy}]: {len(fl)} stocks selected")
+                    # A5 market narrative for hot_picks
+                    sr = _run("A5_Narrative", 3, a5_fusion, trade_date=trade_date, strategy=strategy)
+                    result.stages.append(sr)
                 except Exception as e:
-                    logger.error(f"  Focus list rebuild failed: {e}")
+                    logger.error(f"  FL rebuild failed: {e}")
+                    result.stages.append(StageResult(stage=3, agent="FL_Rebuild", status="FAIL",
+                                                     error=str(e)[:200]))
+                    result.stages.append(StageResult(stage=3, agent="A5_Narrative", status="SKIPPED",
+                                                     error="FL rebuild failed"))
                 # Jump to Stage 4
                 sr = _run("A7_Portfolio", 4, lambda: a7_port(mode=mode, trade_date=trade_date, strategy=strategy))
                 if sr.status != "OK":
@@ -450,27 +457,38 @@ class Orchestrator:
 
             s2_ok = all(sr.status == "OK" for sr in stage2_results.values())
 
-            # ═══ Stage 3: A5 Fusion (needs A1+A4; A2 is background, uses whatever available) ═══
+            # ═══ Stage 3: FL rebuild (replaces A5 scoring, pure computation) ═══
             needed = {"A1_Tech", "A4_Macro"}
             if all(stage2_results.get(n, StageResult(stage=2, agent=n, status="FAIL")).status == "OK"
                    for n in needed):
-                extra = ["hot_picks"] if strategy == "long_term" else None
-                sr = _run("A5_Fusion", 3, a5_fusion, trade_date=trade_date, strategy=strategy,
-                          extra_strategies=extra)
-                result.stages.append(sr)
-                if sr.status == "OK":
-                    try:
-                        from backend.focus_list import rebuild as rebuild_focus
-                        fl = rebuild_focus(strategy=strategy)
-                        logger.info(f"  Focus list [{strategy}]: {len(fl)} stocks")
-                    except Exception as e:
-                        logger.error(f"  Focus list rebuild failed: {e}")
+                # FL rebuild: self-contained factor computation → composite_scores + focus_list
+                from backend.focus_list import rebuild as rebuild_focus
+                try:
+                    fl = rebuild_focus(strategy=strategy)
+                    sr_fl = StageResult(stage=3, agent="FL_Rebuild", status="OK",
+                                        elapsed=0, error=f"{len(fl)} stocks selected")
+                    logger.info(f"  FL [{strategy}]: {len(fl)} stocks selected")
+                except Exception as e:
+                    sr_fl = StageResult(stage=3, agent="FL_Rebuild", status="FAIL",
+                                        error=str(e)[:200], error_category="UNKNOWN")
+                    logger.error(f"  FL rebuild failed: {e}")
+                result.stages.append(sr_fl)
+
+                # A5 market narrative: LLM synthesizes FL distribution + macro
+                if sr_fl.status == "OK":
+                    sr = _run("A5_Narrative", 3, a5_fusion, trade_date=trade_date, strategy=strategy)
+                    result.stages.append(sr)
+                else:
+                    result.stages.append(StageResult(stage=3, agent="A5_Narrative", status="SKIPPED",
+                                                     error="FL rebuild failed"))
             else:
                 missing = [n for n in needed if stage2_results.get(n, StageResult(stage=2, agent=n, status="FAIL")).status != "OK"]
-                sr = StageResult(stage=3, agent="A5_Fusion", status="SKIPPED",
-                                 error=f"prerequisites failed: {missing}",
-                                 error_category="DATA")
-                result.stages.append(sr)
+                result.stages.append(StageResult(stage=3, agent="FL_Rebuild", status="SKIPPED",
+                                                 error=f"prerequisites failed: {missing}",
+                                                 error_category="DATA"))
+                result.stages.append(StageResult(stage=3, agent="A5_Narrative", status="SKIPPED",
+                                                 error=f"prerequisites failed: {missing}",
+                                                 error_category="DATA"))
 
             # ═══ Stage 4: A7 (portfolio construction + risk annotation) ═══
             sr = _run("A7_Portfolio", 4, lambda: a7_port(mode=mode, trade_date=trade_date, strategy=strategy))

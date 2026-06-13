@@ -870,6 +870,12 @@ def _scheduler_loop():
     """
     global _scheduler_running
     _scheduler_running = True
+    # On restart, mark all tasks as already run to prevent immediate trigger
+    # within the current time window. They'll fire on the next scheduled window.
+    now = time.time()
+    for key in ["a2_stop", "data_fetch_13", "pipeline_14", "data_fetch_18",
+                "a0_daily", "pipeline_21", "a2_start"]:
+        _task_last_run[key] = now
     logger.info("Scheduler: A2 stop@08:30, data@13:15(targeted), pipeline@14:00, "
                 "data@18:00(full), A0@20:00(Mon-Sat), pipeline2@21:00, A2 start@22:00")
 

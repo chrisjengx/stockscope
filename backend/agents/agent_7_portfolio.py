@@ -40,94 +40,26 @@ RAPID_SELL_DAYS = 7
 # Layer 1: Conviction Scoring (zero LLM)
 # ══════════════════════════════════════════════════════════════════
 
-def compute_conviction(code, a5_scores, a2_report, fusion_fragility, macro_regime,
-                       momentum_d3=0, momentum_d5=0, momentum_d20=0, momentum_d60=0,
-                       momentum_accel=0, strategy="long_term"):
-    """Per-stock conviction score 0-1. Pure math, strategy-differentiated weights.
+def compute_conviction(code, fl_score, a2_report, strategy="long_term"):
+    """Conviction 0-1 from FL score + A2 red flag fine-tuning.
 
-    long_term: fundamental-heavy (mom 25%, a2 15%) — quality + sustainability
-    hot_picks: momentum-heavy (mom 35%, a2 8%) — short-term upside potential
+    FL already handles: momentum quality, acceleration state, trend direction, volume health.
+    A7 only adds: red flag fine-tuning (FL gates only check extremes).
+    No duplicate computation of FL factors.
     """
-    # Base: A5 score normalized to 0-1
-    base = a5_scores.get("total_score", 50) / 100.0
+    base = (fl_score or 50) / 100.0
 
-    # A2 data quality: reduced weight (25% → 15%)
-    a2_conf = a2_report.get("confidence", 0) if a2_report else 0
-    a2_factor = 0.4 + 0.6 * a2_conf
-
-    # Fragility from A5 fusion analysis
-    fragility_map = {
-        "STABLE": 1.0, "MEDIUM": 0.7, "REVERSING": 0.7,
-        "HIGH": 0.5, "NO_DATA": 0.5,
-    }
-    fragility = fragility_map.get(fusion_fragility, 0.5) if fusion_fragility else 0.5
-    if not fusion_fragility:
-        fragility = 0.5 + 0.5 * a2_conf
-
-    # Momentum quality (25%): multi-timeframe signal assessment, v3
-    # Priority: acceleration + d3 early signal > duration of trend
-    # d3>0 is the earliest reversal indicator — strongly rewarded
-    if momentum_d3 > 0 and momentum_d5 > 0 and momentum_accel > 3:
-        momentum_quality = 1.0   # confirmed upturn + accelerating — strongest
-    elif momentum_d5 > 0 and momentum_accel > 3:
-        momentum_quality = 0.90  # rising + accelerating
-    elif momentum_d3 > 0 and momentum_d5 > 0:
-        momentum_quality = 0.80  # short+mid term confirmed upturn
-    elif momentum_d3 > 0 and momentum_accel > 3:
-        momentum_quality = 0.70  # d3 just turned positive + acc strong — early reversal signal
-    elif momentum_d3 > 0 and momentum_accel > 0:
-        momentum_quality = 0.60  # d3 positive + trend improving — early stage
-    elif momentum_d5 > 0 and momentum_accel > 0:
-        momentum_quality = 0.55  # rising, not decelerating
-    elif momentum_d5 > 0:
-        momentum_quality = 0.45  # basic uptrend
-    elif momentum_d5 < 0 and momentum_accel > 3:
-        momentum_quality = 0.30  # still falling, slowing fast (not yet reversal)
-    elif momentum_d5 < 0 and momentum_accel > 0:
-        momentum_quality = 0.20  # falling but slowing slightly
-    elif momentum_accel < -5:
-        momentum_quality = 0.10  # strong deceleration
-    elif momentum_accel < -3:
-        momentum_quality = 0.15  # moderate deceleration
-    else:
-        momentum_quality = 0.35  # neutral / indeterminate
-
-    # Red flag penalty
+    # Red flag fine-tuning: FL Gate 1 only rejects extremes (fh=POOR+eq=LOW, rfs≥5).
+    # A7 adds granular penalty for remaining flags that passed the gate.
     rf_penalty = 0.0
     if a2_report:
         for rf in a2_report.get("red_flags", []):
             sev = rf.get("severity", "MEDIUM") if isinstance(rf, dict) else "MEDIUM"
-            rf_penalty += 0.15 if sev == "HIGH" else 0.08 if sev == "MEDIUM" else 0.03
-    rf_penalty = min(0.5, rf_penalty)
+            rf_penalty += 0.10 if sev == "HIGH" else 0.05 if sev == "MEDIUM" else 0.02
+    rf_penalty = min(0.25, rf_penalty)
 
-    # Macro regime reference (qualitative only, no numeric factor)
-
-    # d3/d5 dual-negative penalty (replaces hard REJECT rule)
-    d3_d5_penalty = 0.15 if (momentum_d3 < 0 and momentum_d5 < 0) else 0.0
-
-    # Adaptive weights: when A2 data is sparse/low-confidence, shift weight
-    # from fundamentals → momentum instead of penalizing the stock.
-    # a2_conf ∈ [0,1] drives the blend: 1=full A2, 0=no A2.
-    if strategy == "hot_picks":
-        w_base = 0.25
-        w_mom  = 0.35 + (1 - a2_conf) * 0.07    # 0.35 → 0.42 when no A2
-        w_a2   = 0.08 * a2_conf                   # 0.08 → 0.00 when no A2
-        w_frag = 0.12
-        w_safe = 1.0 - w_base - w_mom - w_a2 - w_frag
-    else:  # long_term
-        w_base = 0.25
-        w_mom  = 0.25 + (1 - a2_conf) * 0.13    # 0.25 → 0.38 when no A2
-        w_a2   = 0.15 * a2_conf                   # 0.15 → 0.00 when no A2
-        w_frag = 0.15
-        w_safe = 1.0 - w_base - w_mom - w_a2 - w_frag
-
-    conviction = (
-        base * w_base +
-        momentum_quality * w_mom +
-        a2_factor * w_a2 +
-        fragility * w_frag +
-        (1.0 - rf_penalty - d3_d5_penalty) * w_safe
-    )
+    # FL score dominates (85%), red flags fine-tune (15%)
+    conviction = base * 0.85 + (1.0 - rf_penalty) * 0.15
     return round(max(0.05, min(1.0, conviction)), 3)
 
 
@@ -185,6 +117,9 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
                 "val": rep.get("valuation", {}).get("rating", "?"),
                 "rfs": [f"{rf.get('severity','?')}:{rf.get('flag','?')}" for rf in rep.get("red_flags", [])],
                 "conf": rep.get("confidence", 0),
+                "narrative": rep.get("narrative", ""),
+                "fundamental_score": rep.get("fundamental_score"),
+                "score_rationale": rep.get("score_rationale", ""),
             }
         except (json.JSONDecodeError, TypeError):
             pass
@@ -234,24 +169,25 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     sector_view = str(macro_report.get("sector_view", "")) if macro_report else ""
     fusion_narrative = str(fusion_report.get("overall_narrative", "无"))[:200] if fusion_report else "无"
 
-
-    # ── Percentage-based inclusion boundary, 7-20% per batch ──
-    include_pct = 0.125 if strategy == "hot_picks" else 0.10
-    max_include = max(5, int(len(candidates) * include_pct))
-
-    # Strategy-differentiated role descriptions
     if strategy == "hot_picks":
         role_lines = [
             "=== 你的角色 ===",
             "你是热点猎手。持仓3-5天，快进快出。",
-            "你的任务是找出「动量最强、短期最可能快速上涨」的股票。",
-            "不关心长期价值——只关心未来几天能不能涨。",
+            "你的核心任务是找出「刚启动、还在加速初期」的股票，而非「已经涨了很多」的股票。",
+            "早期动量的价值 >> 已经兑现的涨幅。",
             "",
-            "选股优先级: 动量强度 > 量价配合 > 基本面(仅查硬伤)",
-            "硬伤: fh=POOR且eq=LOW → 建议REJECT(LLM可酌情纳入,需明确反驳理由)。其余基本面瑕疵(ROE低/负债高/估值高/数据缺失)不重要。",
-            "量比>1.5=放量(资金关注), <0.7=缩量(无人气)。价涨量缩=警惕, 价涨量增=健康。OBV与价格方向背离=信号矛盾。",
+            "选股优先级: 加速度(是否刚启动) > 量价配合(资金是否在进场) > 方向健康度(是否还没透支)",
+            "硬伤: fh=POOR且eq=LOW → 建议REJECT。其余基本面瑕疵不重要。",
             "",
-            "对每只候选股回答: 1.动量够不够强? 2.量价配合是否健康? 3.3-5天内空间够不够?",
+            "=== 上涨阶段判断（关键）===",
+            "早期信号(优先选): acc>0且刚转正、放量、d20<20%尚未透支、RSI 40-65",
+            "中期信号(可考虑): acc>0、量平价升、d20 20-40%、RSI 65-75",
+            "后期信号(建议REJECT): acc<0减速、缩量上涨、d20>40%已透支、RSI>80超买",
+            "后期危险组合(必须REJECT): 缩量 + RSI>80 + acc<-5 —— 上涨已近末端，接盘风险极高",
+            "",
+            "量价判断: 放量+资金流入=健康(资金进场)。缩量+价格上涨=警惕(主力可能出货)。缩量回调后放量反弹=最佳入场。",
+            "",
+            "对每只候选股回答: 1.处于上涨的哪个阶段? 2.量价是否支持继续涨? 3.3-5天内空间够不够?",
         ]
     else:
         role_lines = [
@@ -265,23 +201,34 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             "对每只候选股回答: 1.趋势驱动力是什么? 2.基本面是否支撑这个趋势? 3.风险边界在哪?",
         ]
 
+    if strategy == "hot_picks":
+        rejection_rules = [
+            "[hot_picks] 你是做热点的, 不是做价值投资!",
+            "  硬规则: 缩量 + RSI>80 + acc<-5 → 必须REJECT (上涨末期信号)",
+            "  d3<0 且 d5<-5 且 acc<0 → 必须REJECT (仍在下跌)",
+            "  早期动量 > 已兑现涨幅。d20>60%的股票即使d5=+30%也要警惕——空间可能已不大。",
+            "  ROE低/负债高/估值高/数据缺失 —— 这些不重要! 动量质量才重要。",
+        ]
+    else:
+        rejection_rules = [
+            "[long_term] 趋势阶段判断（2-4周持仓，关注早期反转）:",
+            "  早期反转(优先选): d3>0+acc>3 且 d20或d60尚未翻正 = 最佳入场窗口",
+            "  趋势持续(可考虑): d3>0+d5>0+d60>0 且 d20<40%未透支",
+            "  上涨后期(谨慎): d20>40%或d60>80% 且 acc<0 = 降权或REJECT",
+            "  硬伤: d3<0且d5<0→建议REJECT。HIGH红旗→建议REJECT",
+            "",
+            "  量价参考（辅助判断，非硬规则）:",
+            "  放量+资金流入=资金认可趋势，持续性强。缩量上涨=主力控盘或买盘衰竭，结合位置判断。",
+            "  缩量回调+放量反弹=洗盘结束，最佳加仓点。放量滞涨=高位派发，警惕。",
+            "  量价配合好的趋势更可靠，量价背离的趋势即使方向对也要降权。",
+        ]
+
     lines = role_lines + [
         "",
         f"=== 决策指引 ({strategy}) ===",
         f"候选池按确信度排序, 分批处理。每批次独立评估, 选出该批次中最值得纳入的标的。",
         "",
-        # Strategy-differentiated rejection criteria
-        *(
-            ["[hot_picks] 你是做热点的, 不是做价值投资! 你在选'最可能涨的股票', 不是'最好的公司'。",
-             "  唯一硬规则: d3<0 且 d5<-5 且 acc<0 → 必须REJECT",
-             "  ROE低/负债率高/毛利率下降/估值高/利润异常/数据缺失 —— 这些都不重要! 动量够强就纳入。",
-             "  一个d5=+40%的股票, 只要财务不恶化, 就算利润为负(亏损收窄), 也值得推荐。不要用long_term的标准衡量hot_picks。"]
-            if strategy == "hot_picks" else
-            ["[long_term] 选股指引(强烈建议, 非硬规则):",
-             "  1. d3<0 且 d5<0 → 短期仍在下跌, 强烈建议REJECT(LLM可酌情纳入,需在rationale中明确说明)",
-             "  2. HIGH红旗 → 高风险警告, 建议REJECT(LLM可酌情纳入,需明确反驳理由)",
-             "  以下可酌情: acc:0~-3且d5>0=正常盘整可纳, acc:-3~-5但d20/d60>0=降权, acc<-5=谨慎"]
-        ),
+    ] + rejection_rules + [
         "",
         "通用:",
         "- 反转判断: d3>0且acc>0 = 短期势头已转向上。",
@@ -344,10 +291,10 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             f"从以上列出的{batch_size}只候选股中, 按7-20%比例选出{n_min}~{n_max}只纳入(至少1只)。",
             f"其余输出REJECT。每只都要有决策——遗漏自动视为REJECT。",
             "",
-            "输出JSON (rationale和risk_boundary均不超过180字):",
+            "输出JSON (weight必须是数字不是字符串, rationale/risk_boundary均不超过180字):",
             "{",
             '  "a7_decisions": [',
-            '    {"ts_code":"XXXX01.SZ","a7_recommendation":"INCLUDE","weight":0.15,',
+            '    {"ts_code":"XXXX01.SZ","a7_recommendation":"INCLUDE","weight":0.15,  // weight是数字,不要加引号',
             '     "rationale":"日线三连阳突破MA60,d5=+8%d20=+15%趋势加速acc=7,量价配合良好,新能车板块回暖,短期有继续上行空间",',
             '     "risk_boundary":"若跌破MA20或单日跌幅>5%则止损"},',
             '    {"ts_code":"XXXX02.SH","a7_recommendation":"REJECT",',
@@ -380,15 +327,29 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             tier = get_conviction_tier(c.get("conviction", 0), strategy)
             batch_lines.append(
                 f"{batch_start+i:2d}. {code} [{c.get('conviction',0):.2f}/{tier['label']}] "
-                f"A5#{c.get('a5_rank','?')}/{c.get('a5_score',0):.0f} "
-                f"[T:{c.get('tech_score',0):.0f} F:{c.get('fund_score',0):.0f}] "
+                f"核心:{c.get('fl_core_label','?')}={c.get('fl_core_score',0):.0f} | "
                 f"d3:{c.get('momentum_d3',0):+.1f}% d5:{c.get('momentum_d5',0):+.1f}% "
                 f"d20:{c.get('momentum_d20',0):+.1f}% d60:{c.get('momentum_d60',0):+.1f}% acc:{c.get('momentum_accel',0):+.1f}"
             )
             if a2:
-                batch_lines.append(f"    A2: 盈{a2.get('eq','?')} 财{a2.get('fh','?')} 估{a2.get('val','?')} | 红旗:{a2.get('rfs',[]) or '无'} | 置信:{a2.get('conf',0):.0%}")
+                fs_a2 = a2.get('fundamental_score')
+                fs_rationale = a2.get('score_rationale', '') if isinstance(a2.get('score_rationale'), str) else ''
+                a2_narrative = a2.get('narrative', '') if isinstance(a2.get('narrative'), str) else ''
+                narrative_preview = a2_narrative[:120].replace('\n', ' ') if a2_narrative else ''
+                fs_str = f"基本面={fs_a2:.0f}" if fs_a2 is not None else "基本面=?"
+                rfs_list = a2.get('rfs', [])
+                rfs_str = ', '.join(rfs_list) if rfs_list else '无'
+                batch_lines.append(
+                    f"    A2: {fs_str} (置信{a2.get('conf',0):.0%}) "
+                    f"盈{a2.get('eq','?')} 财{a2.get('fh','?')} 估{a2.get('val','?')} "
+                    f"| 红旗:{rfs_str}"
+                )
+                if fs_rationale:
+                    batch_lines.append(f"    A2评分理由: {fs_rationale}")
+                if narrative_preview and narrative_preview != fs_rationale:
+                    batch_lines.append(f"    A2分析: {narrative_preview}")
             else:
-                batch_lines.append(f"    A2: 缺失")
+                batch_lines.append(f"    A2: 缺失 (无LLM基本面分析)")
             vol_seq = list(reversed(c.get('vol_5d', [])))   # oldest → newest
             close_seq = list(reversed(c.get('close_5d', [])))
             vol_str = " → ".join(f"{v:.1f}亿" for v in vol_seq) if vol_seq else "无数据"
@@ -402,7 +363,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
                 f"    MACD:{c.get('macd','?')} RSI:{c.get('rsi','?')} MA:{c.get('ma','?')} "
                 f"现价:{c.get('price',0):.2f}"
             )
-            batch_lines.append(f"    5日量价: 量{vol_str} ({vol_trend}) | 价{close_str}")
+            batch_lines.append(f"    量价: {c.get('vol_analysis','?')} | 价序:{close_str}")
 
         # Holdings review (first batch only)
         if batch_idx == 0 and holdings_sells:
@@ -495,8 +456,8 @@ def validate_and_enforce(portfolio, candidates, cfg):
     clean = {}
 
     # Sort by weight descending
-    sorted_items = sorted(portfolio.items(), key=lambda x: -x[1]) if isinstance(portfolio, dict) else sorted(
-        [(p["ts_code"], p["weight"]) for p in (portfolio if isinstance(portfolio, list) else [])],
+    sorted_items = sorted(portfolio.items(), key=lambda x: -float(x[1])) if isinstance(portfolio, dict) else sorted(
+        [(p["ts_code"], float(p["weight"])) for p in (portfolio if isinstance(portfolio, list) else [])],
         key=lambda x: -x[1],
     )
 
@@ -639,32 +600,12 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        # ── Load A5 fusion trend stages per stock ──
-        fusion_fragility = {}
-        if fusion_report:
-            # New format: trend_stages with stage field
-            for ts in fusion_report.get("trend_stages", []):
-                if isinstance(ts, dict):
-                    stage = ts.get("stage", "")
-                    # Map trend stage to fragility tier
-                    if stage in ("ACCELERATING", "SUSTAINING"):
-                        fusion_fragility[ts.get("ts_code", "")] = "STABLE"
-                    elif stage == "DECELERATING":
-                        fusion_fragility[ts.get("ts_code", "")] = "MEDIUM"
-                    elif stage == "REVERSING":
-                        fusion_fragility[ts.get("ts_code", "")] = "REVERSING"
-                    else:
-                        fusion_fragility[ts.get("ts_code", "")] = "HIGH"
-            # Fallback: old format factor_attribution
-            if not fusion_fragility:
-                for fa in fusion_report.get("factor_attribution", []):
-                    if isinstance(fa, dict):
-                        fusion_fragility[fa.get("ts_code", "")] = fa.get("fragility")
-
         # ── Load focus list ──
         from backend.focus_list import get_focus_codes
         focus = get_focus_codes(conn, strategy=strategy)
         focus_codes = {f["ts_code"] for f in focus}
+        fl_scores = {f["ts_code"]: {"value": f.get("value_score"), "momentum": f.get("momentum_score")} for f in focus}
+        fl_positions = {f["ts_code"]: f.get("position", 999) for f in focus}
         held_codes = {h["ts_code"] for h in holdings}
 
         # Industry map
@@ -675,6 +616,55 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             list(focus_codes),
         ).fetchall():
             code_industry[r["ts_code"]] = r["industry"] or "其他"
+
+        # ── Volume analysis helper ──
+        def _vol_analysis(amounts, closes):
+            """Return detailed volume-price context for LLM reference (not a score)."""
+            if not amounts or len(amounts) < 3:
+                return "量价数据不足"
+            n = len(amounts)
+            vol_avg = sum(amounts) / n
+            # Volume trajectory
+            if len(amounts) >= 3:
+                half = n // 2
+                recent_vol = sum(amounts[-half:]) / half
+                older_vol = sum(amounts[:half]) / half if half > 0 else vol_avg
+                if older_vol > 0 and recent_vol > older_vol * 1.2:
+                    vol_traj = "递增"
+                elif older_vol > 0 and recent_vol < older_vol * 0.8:
+                    vol_traj = "递减"
+                else:
+                    vol_traj = "平稳"
+            else:
+                vol_traj = "?"
+            # Volume level vs latest
+            if amounts[-1] > vol_avg * 1.3:
+                vol_level = "放量"
+            elif amounts[-1] < vol_avg * 0.7:
+                vol_level = "缩量"
+            else:
+                vol_level = "量平"
+            # Buy/sell pressure
+            up_vols, dn_vols = 0, 0
+            for i in range(1, n):
+                if closes[i] > closes[i-1]: up_vols += amounts[i]
+                elif closes[i] < closes[i-1]: dn_vols += amounts[i]
+            pressure = "?"
+            if up_vols + dn_vols > 0:
+                ratio = up_vols / (up_vols + dn_vols) if (up_vols + dn_vols) > 0 else 0.5
+                if ratio > 0.6: pressure = "资金流入"
+                elif ratio < 0.4: pressure = "资金流出"
+                else: pressure = "资金均衡"
+            # Price summary
+            if closes and closes[0] and closes[0] > 0 and closes[-1] and closes[-1] > 0:
+                p_chg = (closes[-1] / closes[0] - 1) * 100
+                high = max(closes)
+                low = min(closes)
+                p_range = (high / low - 1) * 100 if low > 0 else 0
+                p_str = f"价{p_chg:+.1f}% 波动{p_range:.1f}%"
+            else:
+                p_str = "?"
+            return f"{vol_traj}→{vol_level} {pressure} | {p_str}"
 
         # Factor driver tag from A5 scores
         def _driver_tag(code):
@@ -697,24 +687,17 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             if code not in a5_scores or code in held_codes:
                 continue
             sc = a5_scores.get(code, {})
-            conv = compute_conviction(
-                code, sc, a2_reports.get(code),
-                fusion_fragility.get(code), macro_regime,
-                strategy=strategy,
-                momentum_d3=sc.get("momentum_d3") or 0,
-                momentum_d5=sc.get("momentum_d5") or 0,
-                momentum_d20=sc.get("momentum_d20") or 0,
-                momentum_d60=sc.get("momentum_d60") or 0,
-                momentum_accel=sc.get("momentum_accel") or 0,
-            )
+            fs = fl_scores.get(code, {})
+            fl_score = fs.get("value") if strategy == "long_term" else fs.get("momentum")
+            conv = compute_conviction(code, fl_score, a2_reports.get(code), strategy=strategy)
             tier = get_conviction_tier(conv, strategy)
             if tier["label"].startswith("低确信"):
                 continue
             focus_convictions.append((code, conv))
 
-        # Sort by conviction, take enough for LLM to choose from
+        # Sort by conviction, take all FL candidates (FL already narrowed to 200)
         focus_convictions.sort(key=lambda x: -x[1])
-        sample_pct = 0.40 if strategy == "long_term" else 0.40
+        sample_pct = 1.0
         max_candidates = max(15, int(len(focus_convictions) * sample_pct))
         pool_codes = [c for c, _ in focus_convictions[:max_candidates]]
 
@@ -738,6 +721,15 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                 available_cash = pv * (1.0 - sum(h.get("weight", 0) for h in holdings) - cfg["min_cash"])
             shares = max(100, int(available_cash * buy_weight / price / 100) * 100)
 
+            fs = fl_scores.get(code, {})
+            fl_vs = fs.get("value")       # fundamental_score
+            fl_ms = fs.get("momentum")     # short_momentum
+            core_label = "基本面分" if strategy == "long_term" else "早期动量"
+            core_score = fl_vs if strategy == "long_term" else fl_ms
+            vol_analysis = _vol_analysis(
+                vol_price_5d.get(code, {}).get("amounts", []),
+                vol_price_5d.get(code, {}).get("closes", []),
+            )
             cand = {
                 "ts_code": code,
                 "conviction": conv,
@@ -762,6 +754,10 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                 "ma": a1_indicators.get(code, {}).get("ma", "?"),
                 "vol_5d": vol_price_5d.get(code, {}).get("amounts", []),
                 "close_5d": vol_price_5d.get(code, {}).get("closes", []),
+                "vol_analysis": vol_analysis,
+                "fl_score": f"{core_label}={core_score:.0f}",
+                "fl_core_score": core_score,
+                "fl_core_label": core_label,
                 "suggested_shares": shares,
                 "industry": code_industry.get(code, "其他"),
             }
@@ -770,39 +766,54 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
 
         # ── Sell/Hold decisions for current holdings ──
         holdings_decisions = []
-        n_scores = len(a5_scores)
+        fl_total = len(focus_codes)
         for h in holdings:
             code = h["ts_code"]
-            rank = a5_scores.get(code, {}).get("rank", 999)
+            fl_pos = fl_positions.get(code, 999)  # FL position (1-based, lower = better)
+            fl_score = (fl_scores.get(code, {}).get("value") if strategy == "long_term"
+                        else fl_scores.get(code, {}).get("momentum"))
             pnl = h.get("pnl_pct", 0)
             days = h.get("hold_days", 0)
 
             if strategy == "hot_picks":
-                # Hot picks: aggressive — momentum decay is sell signal
-                if rank > n_scores * 0.6:
-                    action, reason = "SELL", f"排名{rank}(>{n_scores*0.6:.0f})→清仓"
-                elif rank > n_scores * 0.4 and (pnl < -5 or days > 5):
-                    action, reason = "REDUCE", f"排名{rank}下降+动量衰减→减仓"
+                # Hot picks: aggressive — momentum decay or FL drop is sell signal
+                not_in_fl = fl_pos == 999
+                bottom_40 = fl_pos > fl_total * 0.6
+                if not_in_fl:
+                    action, reason = "SELL", f"不在FL→清仓"
+                elif bottom_40 and (pnl < -5 or days > 5):
+                    action, reason = "SELL", f"FL#{fl_pos}(后40%)+动量衰减→清仓"
                 elif days > 5 and pnl < 0:
                     action, reason = "REDUCE", f"持有{days}日+亏损{pnl:.0f}%→时间止损"
+                elif bottom_40:
+                    action, reason = "REDUCE", f"FL#{fl_pos}(后40%)→减仓"
                 else:
-                    action, reason = "HOLD", f"排名{rank}继续跟踪"
+                    action, reason = "HOLD", f"FL#{fl_pos} 继续跟踪"
             else:
-                # Long term: conservative — only sell on significant rank drop
-                if rank > n_scores * 0.5:
+                # Long term: conservative — only sell on significant FL drop
+                not_in_fl = fl_pos == 999
+                bottom_50 = fl_pos > fl_total * 0.5
+                if not_in_fl:
                     if pnl < -10:
-                        action, reason = "SELL", f"排名{rank}(>{n_scores//2})+亏损{pnl:.0f}%→止损"
+                        action, reason = "SELL", f"不在FL+亏损{pnl:.0f}%→止损"
                     elif pnl > 15:
-                        action, reason = "REDUCE", f"排名{rank}(>{n_scores//2})+盈利{pnl:.0f}%→减仓锁定"
+                        action, reason = "REDUCE", f"不在FL+盈利{pnl:.0f}%→减仓锁定"
                     else:
-                        action, reason = "REDUCE", f"排名{rank}(>{n_scores//2})→减仓观望"
-                elif rank > n_scores * 0.3:
-                    action, reason = ("REDUCE" if pnl < 0 else "HOLD"), f"排名{rank}中等"
+                        action, reason = "REDUCE", f"不在FL→减仓观望"
+                elif bottom_50:
+                    if pnl < -10:
+                        action, reason = "SELL", f"FL#{fl_pos}(后50%)+亏损{pnl:.0f}%→止损"
+                    elif pnl > 15:
+                        action, reason = "REDUCE", f"FL#{fl_pos}(后50%)+盈利{pnl:.0f}%→减仓锁定"
+                    else:
+                        action, reason = "REDUCE", f"FL#{fl_pos}(后50%)→减仓观望"
+                elif fl_pos > fl_total * 0.3 and pnl < 0:
+                    action, reason = "REDUCE", f"FL#{fl_pos}中等+微亏→减仓"
                 else:
-                    action, reason = "HOLD", f"排名{rank}继续持有"
+                    action, reason = "HOLD", f"FL#{fl_pos} 继续持有"
 
             d = {"ts_code": code, "action": action, "reason": reason,
-                 "rank": rank, "pnl_pct": round(pnl, 2), "hold_days": days,
+                 "rank": fl_pos, "pnl_pct": round(pnl, 2), "hold_days": days,
                  "type": "holding_review"}
             if action in ("SELL", "REDUCE") and days < RAPID_SELL_DAYS:
                 d["rapid_sell_flag"] = True
@@ -826,32 +837,33 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
         sell_rejected = []
 
         if llm_result:
+            # Normalize LLM output types (LLM may return weight as string)
+            def _norm(item):
+                w = item.get("weight", 0)
+                return {
+                    "a7_recommendation": item.get("a7_recommendation", "REJECT"),
+                    "weight": float(w) if w else 0.0,
+                    "rationale": item.get("rationale", ""),
+                }
+
             # Preferred: unified a7_decisions array
             raw_decisions = llm_result.get("a7_decisions", [])
             if not raw_decisions:
                 # Fallback: old portfolio+rejected format
                 for item in llm_result.get("portfolio", []):
                     if isinstance(item, dict):
-                        a7_decisions[item.get("ts_code", "")] = {
-                            "a7_recommendation": "INCLUDE",
-                            "weight": item.get("weight", 0),
-                            "rationale": item.get("rationale", ""),
-                        }
+                        a7_decisions[item.get("ts_code", "")] = _norm(item)
                 for item in llm_result.get("rejected", []):
                     if isinstance(item, dict):
                         a7_decisions[item.get("ts_code", "")] = {
                             "a7_recommendation": "REJECT",
-                            "weight": 0,
+                            "weight": 0.0,
                             "rationale": item.get("reason", ""),
                         }
             else:
                 for item in raw_decisions:
                     if isinstance(item, dict):
-                        a7_decisions[item.get("ts_code", "")] = {
-                            "a7_recommendation": item.get("a7_recommendation", "REJECT"),
-                            "weight": item.get("weight", 0),
-                            "rationale": item.get("rationale", ""),
-                        }
+                        a7_decisions[item.get("ts_code", "")] = _norm(item)
 
             a7_strategic_cash = llm_result.get("a7_strategic_cash", llm_result.get("strategic_cash", cfg["min_cash"]))
             a7_cash_rationale = llm_result.get("a7_cash_rationale", llm_result.get("cash_reason", ""))
