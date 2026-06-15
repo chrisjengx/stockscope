@@ -128,7 +128,6 @@ class Orchestrator:
     _instance: Optional["Orchestrator"] = None
     _locks: dict[str, bool] = {}
     _lock_obj = threading.Lock()
-    _shared_cache: dict[str, dict] = {}  # A1/A3/A4 results for strategy reuse
 
     def __new__(cls):
         if cls._instance is None:
@@ -161,17 +160,14 @@ class Orchestrator:
                 self._locks.pop(lock_key, None)
 
     def run_all(self, mode: str = "daily") -> list[PipelineResult]:
-        """Run both strategies sequentially. A0-A5 shared; A5 computes both strategies in one pass."""
+        """Run both strategies sequentially and independently."""
         results = []
-        self._shared_cache = {}  # Reset per cycle
         # Bypass trading day check — orchestrator runs when invoked
-        # long_term: full pipeline, A5 computes scores for BOTH strategies
         result_lt = self._execute(mode, "long_term")
         results.append(result_lt)
         if result_lt.status == "ABORTED":
             return results
-        # hot_picks: skip A0-A5 (already done), run A7+A6 only
-        result_hp = self._execute(mode, "hot_picks", skip_early_stages=True)
+        result_hp = self._execute(mode, "hot_picks")
         results.append(result_hp)
         return results
 
@@ -185,7 +181,7 @@ class Orchestrator:
 
     # ── Internal execution ──────────────────────────────────
 
-    def _execute(self, mode: str, strategy: str, skip_early_stages: bool = False) -> PipelineResult:
+    def _execute(self, mode: str, strategy: str) -> PipelineResult:
         """Execute the full 9-agent DAG with closed-loop monitoring."""
         from backend.agents.agent_0_tier import run as a0
         from backend.agents.agent_1_technical import run as a1
@@ -301,9 +297,6 @@ class Orchestrator:
                     from backend.data.fetcher import daily_update
                     daily_update()
                     logger.info(f"  ✅ Data fetch complete")
-                    # Invalidate A1/A4 cache — data changed, re-analysis needed
-                    self._shared_cache.pop("A1_Tech", None)
-                    self._shared_cache.pop("A4_Macro", None)
                     result.stages.append(StageResult(stage=0, agent="Data_Fetch",
                                                     status="OK", error=f"fetched {td_gap}d gap"))
                 except Exception as e:
@@ -317,49 +310,6 @@ class Orchestrator:
             else:
                 result.stages.append(StageResult(stage=0, agent="Data_Freshness",
                                                 status="OK", error=f"fresh (latest={dq['latest'][:10] if dq else 'none'})"))
-
-            # ═══ Skip early stages for hot_picks: reuse A0/A1/A3/A4 from long_term ═══
-            if skip_early_stages:
-                result.stages.append(StageResult(stage=1, agent="A0_Universe", status="SKIPPED",
-                                                 error="hot_picks — A0 skipped"))
-                result.stages.append(StageResult(stage=2, agent="A2_Fund", status="OK",
-                                                 error="runs as independent server Worker"))
-                result.stages.append(StageResult(stage=2, agent="A3_News", status="SKIPPED",
-                                                 error="hot_picks — reused from long_term"))
-                result.stages.append(StageResult(stage=2, agent="A1_Tech", status="SKIPPED",
-                                                 error="hot_picks — reused from long_term"))
-                result.stages.append(StageResult(stage=2, agent="A4_Macro", status="SKIPPED",
-                                                 error="hot_picks — reused from long_term"))
-                # Stage 3: FL rebuild for hot_picks (strategy-specific scoring)
-                try:
-                    from backend.focus_list import rebuild as rebuild_focus
-                    fl = rebuild_focus(strategy=strategy)
-                    result.stages.append(StageResult(stage=3, agent="FL_Rebuild", status="OK",
-                                                     error=f"{len(fl)} stocks selected"))
-                    logger.info(f"  FL [{strategy}]: {len(fl)} stocks selected")
-                    # A5 market narrative for hot_picks
-                    sr = _run("A5_Narrative", 3, a5_fusion, trade_date=trade_date, strategy=strategy)
-                    result.stages.append(sr)
-                except Exception as e:
-                    logger.error(f"  FL rebuild failed: {e}")
-                    result.stages.append(StageResult(stage=3, agent="FL_Rebuild", status="FAIL",
-                                                     error=str(e)[:200]))
-                    result.stages.append(StageResult(stage=3, agent="A5_Narrative", status="SKIPPED",
-                                                     error="FL rebuild failed"))
-                # Jump to Stage 4
-                sr = _run("A7_Portfolio", 4, lambda: a7_port(mode=mode, trade_date=trade_date, strategy=strategy))
-                if sr.status != "OK":
-                    sr.error = (sr.error or "") + " [degraded: upstream may have issues]"
-                result.stages.append(sr)
-                sr = _run("A6_Risk", 5, lambda: a6_risk(strategy=strategy, trade_date=trade_date))
-                if sr.status != "OK":
-                    sr.error = (sr.error or "") + " [A7 decisions remain PENDING — review manually]"
-                result.stages.append(sr)
-                result.status = "COMPLETED" if not result.failed_stages() else "COMPLETED_WITH_ERRORS"
-                result.completed_at = datetime.now().isoformat()
-                _persist_result(result)
-                self._history.append(result)
-                return result
 
             # ═══ Stage 1: A0 (weekly long_term only) ═══
             if mode == "weekly" and strategy == "long_term":
@@ -390,16 +340,6 @@ class Orchestrator:
                 "A1_Tech":    (a1, {"tiers": tiers, "trade_date": trade_date}),
             }
             stage2_results = {"A3_News": sr_a3}
-
-            # Check shared cache from first strategy (hot_picks reuses long_term's A1/A3/A4)
-            for name in list(stage2_tasks.keys()):
-                if name in self._shared_cache:
-                    sr = self._shared_cache[name]
-                    result.stages.append(StageResult(stage=2, agent=name, status=sr.status,
-                                                    error=f"reused from long_term ({sr.elapsed:.0f}s)"))
-                    stage2_results[name] = sr
-                    del stage2_tasks[name]
-                    logger.info(f"  [{name}] REUSED from long_term ({sr.elapsed:.0f}s)")
 
             if stage2_tasks:
                 stage_timeout = 900  # A1 indicator computation can be slow
@@ -442,8 +382,6 @@ class Orchestrator:
                             if sr:
                                 result.stages.append(sr)
                                 stage2_results[name] = sr
-                                if sr.status == "OK" and name in ("A1_Tech", "A4_Macro"):
-                                    self._shared_cache[name] = sr
                                 logger.info(f"  [{name}] {sr.status} ({sr.elapsed:.0f}s)")
                     except TimeoutError:
                         # as_completed timeout — some stages didn't finish
