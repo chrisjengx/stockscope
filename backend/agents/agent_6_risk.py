@@ -2,12 +2,11 @@
 Agent 6: Risk Officer — adversarial review of A7 portfolio recommendations.
 
 Architecture:
-  Layer 1 (no LLM): rule_based_checks() — liquidity, concentration, holdings limit
+  Layer 1 (no LLM): rule_based_checks() — liquidity, concentration, holdings limit, 12 dimensions
   Layer 2 (pro LLM): score_decisions() — reviews upstream agent reports for logical flaws
-  Layer 3 (no LLM): _apply_adversarial_verdicts() — ranking-based VETO/APPROVE
+  Layer 3 (no LLM): _apply_adversarial_verdicts() — triple-signal verdict (risk + recommendation + RED flags)
 
-Verdict: risk_score 1-5 → sort → top 60% APPROVED (floor 5, ceiling 15) + risk>=4 forced VETO.
-Uses llm.reason() with deepseek-v4-pro for strict adversarial review.
+Verdict: risk=5 or rec=AVOID → VETOED; risk≤2+rec=PREFER+no RED → APPROVED; else → APPROVED_WITH_CONCERNS.
 Terminal stage of pipeline — no downstream agent.
 """
 import json, time, logging
@@ -544,61 +543,58 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
     return all_parsed
 
 
-def _apply_adversarial_verdicts(decisions, scores):
-    """Layer 3: risk-driven adversarial elimination.
+def _apply_adversarial_verdicts(decisions, scores, rule_flags=None):
+    """Layer 3: adversarial verdict — three independent signals decide outcome.
 
-    Phase 1: risk_score 1-2 → auto-APPROVED (low risk, no need to compete)
-              risk_score 5   → forced VETOED  (critical risk, always block)
-    Phase 2: risk_score 3-4 → elimination pool, sorted by risk_score ascending
-              top 60% survive (floor 3), remaining VETOED
+    Three signals must ALL agree for clean APPROVED:
+      Signal 1 — LLM risk_score (1-5): quantitative risk assessment
+      Signal 2 — LLM recommendation (PREFER/CAUTION/AVOID): independent judgment
+      Signal 3 — Rule engine: absence of RED flags
 
-    - SELL/HOLD/REDUCE: all APPROVED (don't block risk management)
+    VETOED:       risk>=5 (fatal risk) OR rec=AVOID (adversarial override)
+    APPROVED:     risk<=2 AND rec=PREFER AND no RED flags (rare — clean bill of health)
+    APPROVED_WITH_CONCERNS: everything else (default — trust but verify)
+    SELL/HOLD/REDUCE: always APPROVED (don't block risk management)
     """
     buys = [(d, s) for d, s in zip(decisions, scores) if d.get("action") == "BUY"]
     others = [(d, s) for d, s in zip(decisions, scores) if d.get("action") != "BUY"]
 
-    # Phase 1: force-VETO risk=5, auto-APPROVE risk=1-2
-    # Phase 2: risk=3-4 enter elimination pool
-    elimination_pool = []
+    n_vetoed = 0
+    n_approved = 0
+    n_concern = 0
+
     for d, s in buys:
         risk = s.get("risk_score", 3)
+        rec = s.get("recommendation", "CAUTION")
+        reds, _ = (rule_flags or {}).get(d["ts_code"], ([], []))
+        has_red = len(reds) > 0
+
+        # ── Triple-signal verdict ──
         if risk >= 5:
             s["final_verdict"] = "VETOED"
             s["veto_reason"] = f"risk_score={risk}>=5, 致命风险强制否决"
-        elif risk <= 2:
-            s["final_verdict"] = "APPROVED"
-        else:
-            elimination_pool.append((d, s))
-
-    # Elimination pool: sort by risk (lower = better), top 60% survive
-    elimination_pool.sort(key=lambda x: x[1].get("risk_score", 3))
-    n_pool = len(elimination_pool)
-    cutoff = max(3, int(n_pool * 0.6))  # floor 3, no ceiling needed (risk>=5 already filtered)
-
-    for i, (d, s) in enumerate(elimination_pool):
-        if i < cutoff:
-            s["final_verdict"] = "APPROVED"
-        else:
+            n_vetoed += 1
+        elif rec == "AVOID":
             s["final_verdict"] = "VETOED"
-            s["veto_reason"] = f"淘汰池排名{i+1}/{n_pool}, 超出容量(前{cutoff}只)"
+            s["veto_reason"] = f"A6对抗审查建议AVOID: {s.get('reasoning','')[:120]}"
+            n_vetoed += 1
+        elif risk <= 2 and rec == "PREFER" and not has_red:
+            # All three signals clear: low risk + LLM prefers + no rule violations
+            s["final_verdict"] = "APPROVED"
+            n_approved += 1
+        else:
+            # Default: concerns exist but not fatal
+            s["final_verdict"] = "APPROVED_WITH_CONCERNS"
+            n_concern += 1
 
     # SELL/HOLD/REDUCE: all APPROVED (unchanged)
     for d, s in others:
         s["final_verdict"] = "APPROVED"
 
-    # Logging
-    n_auto_approved = sum(1 for _, s in buys if s.get("risk_score", 3) <= 2)
-    n_elimination = len(elimination_pool)
-    approved_in_pool = min(cutoff, n_pool)
-    vetoed_in_pool = max(0, n_pool - cutoff)
-    forced_veto = sum(1 for _, s in buys if s.get("risk_score", 3) >= 5)
-    total_approved = n_auto_approved + approved_in_pool
-    total_vetoed = forced_veto + vetoed_in_pool
-
+    total_buys = len(buys)
     logger.info(
-        f"A6 verdict: {n_auto_approved} auto-APPROVED + {approved_in_pool}/{n_elimination} "
-        f"pool-approved + {vetoed_in_pool} pool-vetoed + {forced_veto} forced-veto = "
-        f"{total_approved} APPROVED + {total_vetoed} VETOED (from {len(buys)} BUY)"
+        f"A6 verdict ({total_buys} BUYs): {n_approved} APPROVED, "
+        f"{n_concern} WITH_CONCERNS, {n_vetoed} VETOED"
     )
 
     return scores
@@ -700,8 +696,16 @@ def run(trade_date=None, strategy="long_term"):
                     "final_verdict": "APPROVED",
                 })
 
+        # Compute rule_flags for verdict (used by _apply_adversarial_verdicts)
+        rule_flags_all = {}
+        for d in decisions:
+            checks = rule_based_checks(d, holdings, conn, a5_scores, fund_reports)
+            reds = [c["detail"] for c in checks if c["severity"] == "RED"]
+            ambers = [c["detail"] for c in checks if c["severity"] == "AMBER"]
+            rule_flags_all[d["ts_code"]] = (reds, ambers)
+
         # Apply adversarial verdicts
-        scores = _apply_adversarial_verdicts(decisions, scores)
+        scores = _apply_adversarial_verdicts(decisions, scores, rule_flags_all)
 
         # ── REJECT override check: flag low-risk REJECT for manual review ──
         for d, s in zip(decisions, scores):

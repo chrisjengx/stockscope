@@ -101,17 +101,17 @@ def _compute_tech_score(ind, strategy="long_term"):
         components.append(50 + math.tanh(hist * 10) * 40); weights.append(1.0)
     rsi = ind.get("rsi_14", 50)
     if isinstance(rsi, (int, float)):
-        if strategy == "hot_picks": components.append(rsi)
-        else:
-            if rsi > 80: components.append(55)
-            elif rsi > 70: components.append(65)
-            elif rsi < 30: components.append(45)
-            else: components.append(rsi)
+        components.append(rsi)  # use RSI directly — strong RSI = strong trend
         weights.append(1.0)
     bb = ind.get("bollinger", {})
     bb_pos = bb.get("position", 0.5)
     if isinstance(bb_pos, (int, float)):
-        components.append(100 - abs(bb_pos - 0.5) * 200); weights.append(0.5)
+        # Asymmetric: upper band = strength (reward), lower band = weakness (penalize)
+        if bb_pos >= 0.5:
+            score_bb = 50 + (bb_pos - 0.5) * 100   # 0.50→50, 0.75→75, 1.00→100
+        else:
+            score_bb = bb_pos * 100                  # 0.00→0, 0.25→25, 0.50→50
+        components.append(score_bb); weights.append(0.5)
     ma = ind.get("ma_alignment", "mixed")
     components.append({"bullish": 75, "mixed": 50, "bearish": 25}.get(ma, 50)); weights.append(1.0)
     obv_trend = ind.get("obv_trend", "flat")
@@ -235,17 +235,36 @@ def _load_vol_price(conn, codes):
 # ═══════════════════════════════════════════════
 
 def _direction_structure(d3, d5, d20, d60):
+    """Score multi-timeframe trend direction (0-100).
+
+    16 patterns ranked by predictive power for continued upward movement.
+    Longer timeframes carry more weight — d60 matters more than d3.
+    """
     s = (1 if d3 > 0 else 0, 1 if d5 > 0 else 0, 1 if d20 > 0 else 0, 1 if d60 > 0 else 0)
-    if s == (1, 1, 1, 1): return 95
-    if s == (1, 1, 0, 1): return 75
-    if s == (1, 1, 1, 0): return 70
-    if s == (1, 1, 0, 0): return 60
-    if s == (1, 0, 0, 0): return 45
-    if s == (0, 0, 1, 1): return 40
-    if s == (1, 0, 1, 1): return 55
-    if s == (0, 0, 0, 1): return 25
-    if s == (0, 0, 0, 0): return 10
-    return 30
+    # ── Tier 1: all timeframes aligned up ──
+    if s == (1, 1, 1, 1): return 95    # 全周期共振上涨 — 最强信号
+    # ── Tier 2: strong uptrend with one minor concern ──
+    if s == (0, 1, 1, 1): return 75    # 上升中小回调(d3微跌,中长期全涨) — 经典买点
+    if s == (1, 1, 0, 1): return 75    # 短中周涨,20日有回调 — 趋势持续中
+    if s == (1, 0, 1, 1): return 70    # 回调结束(d3翻正确认反弹,d5仍负因回调深,中长期涨)
+    if s == (1, 1, 1, 0): return 70    # 短中周全涨,长期未翻正 — 早期反转
+    # ── Tier 3: positive but with notable concerns ──
+    if s == (1, 1, 0, 0): return 60    # 短期(3日+5日)上涨确立,中长期待确认
+    if s == (1, 0, 0, 1): return 55    # 长期上升中,3日反弹(5日+20日中间有回调)
+    if s == (0, 1, 1, 0): return 55    # 中期反弹确立(5日+20日涨),长期未确认
+    # ── Tier 4: weak positive or mixed ──
+    if s == (1, 0, 0, 0): return 45    # 仅3日上涨 — 微弱反弹
+    if s == (0, 1, 0, 1): return 45    # 长期上升+5日反弹,3日+20日信号分歧
+    if s == (0, 0, 1, 1): return 40    # 中长期涨但短期(3日+5日)走弱 — 较深回调中
+    # ── Tier 5: contradictory or very weak ──
+    if s == (1, 0, 1, 0): return 35    # 信号矛盾(3日+20日涨 vs 5日+60日跌)
+    # ── Tier 6: bearish — only one timeframe positive ──
+    if s == (0, 0, 0, 1): return 25    # 仅60日涨 — 长期上升但近期持续走弱
+    if s == (0, 0, 1, 0): return 20    # 仅20日涨 — 孤立弱信号
+    if s == (0, 1, 0, 0): return 18    # 仅5日涨 — 极弱
+    # ── Tier 7: all down ──
+    if s == (0, 0, 0, 0): return 10    # 全周期下跌 — 最强下跌信号
+    return 30  # unreachable — all 16 patterns covered above
 
 
 def _acceleration_state(accel, is_early_reversal):

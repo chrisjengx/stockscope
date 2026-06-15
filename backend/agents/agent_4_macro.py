@@ -253,7 +253,10 @@ def _add_sector_trends(sectors, target_names):
         if name not in name_to_sector:
             continue
         try:
-            df = ak.stock_board_industry_index_ths(symbol=name, start_date='20260501', end_date='20260610')
+            from datetime import date as _date, timedelta as _td
+            end_d = _date.today().strftime('%Y%m%d')
+            start_d = (_date.today() - _td(days=45)).strftime('%Y%m%d')
+            df = ak.stock_board_industry_index_ths(symbol=name, start_date=start_d, end_date=end_d)
             if df is not None and len(df) >= 6:
                 closes = df["收盘价"].values
                 n = len(closes)

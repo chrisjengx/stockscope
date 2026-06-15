@@ -102,6 +102,7 @@ def generate_html_report(strategy="long_term", trade_date=None):
 
     # Pre-scan includes for A6 verdict counts
     a6_approved_count = 0
+    a6_concern_count = 0
     a6_vetoed_count = 0
     for r in includes:
         try:
@@ -110,6 +111,8 @@ def generate_html_report(strategy="long_term", trade_date=None):
             v = ''
         if v == 'APPROVED':
             a6_approved_count += 1
+        elif v == 'APPROVED_WITH_CONCERNS':
+            a6_concern_count += 1
         elif v == 'VETOED':
             a6_vetoed_count += 1
 
@@ -180,7 +183,8 @@ def generate_html_report(strategy="long_term", trade_date=None):
                     if a.get('final_verdict') == 'OVERRIDE_RECOMMENDED']
 
     # ── A6 最终决策（审批通过 + 低风险找回合并）──
-    html += f"""<div class="section"><h2>A6 最终决策 — {a6_approved_count + len(a6_salvaged)} 只（{a6_approved_count} 审批通过 + {len(a6_salvaged)} 低风险找回）</h2>
+    total_display = a6_approved_count + a6_concern_count + len(a6_salvaged)
+    html += f"""<div class="section"><h2>A6 最终决策 — {total_display} 只（{a6_approved_count} 审批通过 + {a6_concern_count} 附风险通过 + {len(a6_salvaged)} 低风险找回）</h2>
 <p class="narrative">{a7_report.get('a7',{}).get('portfolio_narrative','')[:400]}</p>
 <table><tr><th>类型</th><th>Code</th><th>Name</th><th>Conv</th><th>Weight</th><th>Tier</th><th>A6 Risk</th><th>A7 理由</th><th>A6 审查意见</th></tr>"""
     # Approved rows (from includes)
@@ -190,9 +194,16 @@ def generate_html_report(strategy="long_term", trade_date=None):
         risk = a6.get('risk_score', '?')
         verdict = a6.get('final_verdict', '')
         a6_reason = a6.get('reasoning', '')[:150]
-        row_cls = 'include' if verdict == 'APPROVED' else 'reject'
+        if verdict == 'APPROVED':
+            row_cls = 'include'; label = '✅ 审批通过'
+        elif verdict == 'APPROVED_WITH_CONCERNS':
+            row_cls = ''; label = '⚠️ 附风险通过'
+        elif verdict == 'VETOED':
+            row_cls = 'reject'; label = '❌ 否决'
+        else:
+            row_cls = ''; label = verdict
         html += f"""<tr class="{row_cls}">
-<td><b>{'✅ 审批通过' if verdict == 'APPROVED' else '❌ 否决'}</b></td>
+<td><b>{label}</b></td>
 <td>{r['ts_code']}</td><td>{r['name']}</td>
 <td class="include">{a7.get('conviction',0):.3f}</td>
 <td><b>{a7.get('weight',0):.0%}</b></td><td>{a7.get('tier','?')}</td>
@@ -225,7 +236,7 @@ def generate_html_report(strategy="long_term", trade_date=None):
             continue
         verdict = a6.get('final_verdict', '')
         a7_rec = a7.get('recommendation', '')
-        if verdict == 'APPROVED' and a7_rec == 'INCLUDE':
+        if verdict in ('APPROVED', 'APPROVED_WITH_CONCERNS') and a7_rec == 'INCLUDE':
             row_type = 'A6 审批通过'
         elif verdict == 'OVERRIDE_RECOMMENDED' and a7_rec == 'REJECT':
             row_type = 'A6 低风险找回'

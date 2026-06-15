@@ -150,9 +150,15 @@ def check_momentum_avoid(conn, trade_date):
             continue
 
         changes = [r["change_pct"] for r in rows]
-        d5 = sum(changes[:5])
-        d20 = sum(changes[:20])
-        d30 = sum(changes[:30])
+        # Compound returns — more accurate than simple sum for multi-day periods
+        def _compound(cs, n):
+            prod = 1.0
+            for c in cs[:n]:
+                prod *= (1.0 + c / 100.0)
+            return (prod - 1.0) * 100.0
+        d5 = _compound(changes, 5)
+        d20 = _compound(changes, 20)
+        d30 = _compound(changes, 30)
 
         if d5 < 0 and d20 < 0 and d30 < 0:
             avoid_list[code] = f"全周期下跌趋势(d5:{d5:+.1f}% d20:{d20:+.1f}% d30:{d30:+.1f}%)"

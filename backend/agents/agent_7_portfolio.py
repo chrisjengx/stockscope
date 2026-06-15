@@ -688,7 +688,8 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
                 continue
             sc = a5_scores.get(code, {})
             fs = fl_scores.get(code, {})
-            fl_score = fs.get("value") if strategy == "long_term" else fs.get("momentum")
+            # Use FL's multi-factor total_score for conviction — aligned with FL ranking
+            fl_score = sc.get("total_score", fs.get("value") if strategy == "long_term" else fs.get("momentum"))
             conv = compute_conviction(code, fl_score, a2_reports.get(code), strategy=strategy)
             tier = get_conviction_tier(conv, strategy)
             if tier["label"].startswith("低确信"):

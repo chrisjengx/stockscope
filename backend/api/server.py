@@ -415,7 +415,7 @@ def api_portfolio():
             decision = conn.execute(
                 "SELECT action, status, reason FROM portfolio_decisions "
                 "WHERE ts_code=? AND calc_date=(SELECT MAX(calc_date) FROM portfolio_decisions) "
-                "AND status IN ('APPROVED', 'PENDING') ORDER BY id DESC LIMIT 1",
+                "AND status IN ('APPROVED', 'APPROVED_WITH_CONCERNS', 'PENDING') ORDER BY id DESC LIMIT 1",
                 (hd["ts_code"],),
             ).fetchone()
             hd["decision"] = dict(decision) if decision else None
