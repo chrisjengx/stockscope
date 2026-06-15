@@ -841,7 +841,7 @@ def _save_financials_compat(conn, ts_code, trade_date, metrics, llm_result):
         (ts_code, trade_date,
          metrics.get("roe"), metrics.get("gross_margin"), metrics.get("net_margin"),
          metrics.get("debt_ratio"),
-         metrics.get("revenue_yoy") or metrics.get("profit_yoy"),
+         metrics.get("revenue_yoy") if metrics.get("revenue_yoy") is not None else metrics.get("profit_yoy"),
          metrics.get("fcf_ratio"), metrics.get("pe_ttm"), metrics.get("pb"),
          json.dumps({"source": metrics.get("data_source"),
                      "narrative": (llm_result or {}).get("narrative", "")},

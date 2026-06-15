@@ -167,7 +167,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     regime_summary = macro_report.get("regime_summary", regime_str) if macro_report else regime_str
     macro_narrative = str(macro_report.get("narrative", "无"))[:150] if macro_report else "无"
     sector_view = str(macro_report.get("sector_view", "")) if macro_report else ""
-    fusion_narrative = str(fusion_report.get("overall_narrative", "无"))[:200] if fusion_report else "无"
+    fusion_narrative = str(fusion_report.get("overall_narrative", "无"))[:100] if fusion_report else "无"
 
     if strategy == "hot_picks":
         role_lines = [
@@ -177,15 +177,17 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             "早期动量的价值 >> 已经兑现的涨幅。",
             "",
             "选股优先级: 加速度(是否刚启动) > 量价配合(资金是否在进场) > 方向健康度(是否还没透支)",
-            "硬伤: fh=POOR且eq=LOW → 建议REJECT。其余基本面瑕疵不重要。",
+            "基本面信号(fh/eq/红旗)作为参考——3-5天持仓周期内，动量质量比财务质量更直接影响股价。",
+            "但如果fh=POOR且eq=LOW同时出现，说明基本面全面崩溃，这类标的的上涨往往缺乏持续性。",
             "",
             "=== 上涨阶段判断（关键）===",
-            "早期信号(优先选): acc>0且刚转正、放量、d20<20%尚未透支、RSI 40-65",
-            "中期信号(可考虑): acc>0、量平价升、d20 20-40%、RSI 65-75",
-            "后期信号(建议REJECT): acc<0减速、缩量上涨、d20>40%已透支、RSI>80超买",
-            "后期危险组合(必须REJECT): 缩量 + RSI>80 + acc<-5 —— 上涨已近末端，接盘风险极高",
+            "请结合每只股票的动量数据(d3/d5/d20/d60/acc)、RSI、量价序列，判断它当前处于哪个阶段:",
+            "早期信号: acc>0且刚转正、放量、d20<20%尚未透支、RSI 40-65。空间最充裕，但也可能未确认。",
+            "中期信号: acc>0、量平价升、d20 20-40%、RSI 65-75。趋势已确认，需判断剩余空间。",
+            "后期信号: acc<0减速、缩量上涨、d20>40%已兑现较多、RSI>80。空间收窄，接盘风险上升。",
+            "当多个后期信号叠加(如缩量+RSI>80+acc<-5)，上涨进入末期的概率显著增大。",
             "",
-            "量价判断: 放量+资金流入=健康(资金进场)。缩量+价格上涨=警惕(主力可能出货)。缩量回调后放量反弹=最佳入场。",
+            "量价判断: 放量+资金流入=资金进场，趋势有支撑。缩量+价格上涨=可能是主力控盘或买盘衰竭，需结合位置判断。缩量回调后放量反弹=抛压释放后的资金回流，通常是最佳入场时机。",
             "",
             "对每只候选股回答: 1.处于上涨的哪个阶段? 2.量价是否支持继续涨? 3.3-5天内空间够不够?",
         ]
@@ -196,7 +198,7 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             "你的任务是找到「基本面扎实+趋势健康、未来2-4周有持续上涨空间」的股票。",
             "",
             "选股优先级: 趋势质量 > 基本面支撑 > 估值合理性",
-            "HIGH红旗 → 建议REJECT(LLM可酌情纳入,需明确反驳理由)",
+            "HIGH红旗代表A2深度分析发现的基本面风险信号，如果纳入需要明确的趋势或估值理由来平衡。",
             "",
             "对每只候选股回答: 1.趋势驱动力是什么? 2.基本面是否支撑这个趋势? 3.风险边界在哪?",
         ]
@@ -204,23 +206,26 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     if strategy == "hot_picks":
         rejection_rules = [
             "[hot_picks] 你是做热点的, 不是做价值投资!",
-            "  硬规则: 缩量 + RSI>80 + acc<-5 → 必须REJECT (上涨末期信号)",
-            "  d3<0 且 d5<-5 且 acc<0 → 必须REJECT (仍在下跌)",
-            "  早期动量 > 已兑现涨幅。d20>60%的股票即使d5=+30%也要警惕——空间可能已不大。",
-            "  ROE低/负债高/估值高/数据缺失 —— 这些不重要! 动量质量才重要。",
+            "  以下信号供你参考，但不是绝对规则——结合具体情境做独立判断:",
+            "  · 缩量 + RSI>80 + acc<-5: 上涨末期特征，趋势可能接近尾声",
+            "  · d3<0且d5<-5且acc<0: 短期仍在走弱，需要更强的反转信号才能看多",
+            "  · d20>60%: 中期涨幅已较大，即使d5还在涨，剩余空间可能有限",
+            "  · ROE低/负债高/估值高/数据缺失: 在3-5天尺度上影响有限，动量质量更关键",
         ]
     else:
         rejection_rules = [
             "[long_term] 趋势阶段判断（2-4周持仓，关注早期反转）:",
-            "  早期反转(优先选): d3>0+acc>3 且 d20或d60尚未翻正 = 最佳入场窗口",
-            "  趋势持续(可考虑): d3>0+d5>0+d60>0 且 d20<40%未透支",
-            "  上涨后期(谨慎): d20>40%或d60>80% 且 acc<0 = 降权或REJECT",
-            "  硬伤: d3<0且d5<0→建议REJECT。HIGH红旗→建议REJECT",
+            "  以下阶段描述供你参考，结合每只股票的具体数据做判断:",
+            "  早期反转: d3>0+acc>3且d20或d60尚未翻正。趋势刚启动，空间最充裕但确认度最低。",
+            "  趋势持续: d3>0+d5>0+d60>0且d20<40%。趋势已确认，在未透支的前提下仍有空间。",
+            "  上涨后期: d20>40%或d60>80%且acc<0。中期涨幅已充分，加速度衰减，继续上行需要更强的催化剂。",
+            "  d3<0且d5<0: 短期势头偏弱，2-4周持仓下需要更有力的趋势或基本面信号来平衡。",
+            "  HIGH红旗: 基本面的明确风险点，纳入时请说明为什么趋势或估值可以弥补这些风险。",
             "",
-            "  量价参考（辅助判断，非硬规则）:",
-            "  放量+资金流入=资金认可趋势，持续性强。缩量上涨=主力控盘或买盘衰竭，结合位置判断。",
-            "  缩量回调+放量反弹=洗盘结束，最佳加仓点。放量滞涨=高位派发，警惕。",
-            "  量价配合好的趋势更可靠，量价背离的趋势即使方向对也要降权。",
+            "  量价参考:",
+            "  放量+资金流入=资金认可趋势。缩量上涨=控盘或买盘衰竭，结合位置。",
+            "  缩量回调+放量反弹=抛压释放后的回流，通常是最佳加仓点。放量滞涨=警惕派发。",
+            "  量价配合好的趋势更可靠，量价背离的趋势即使方向对也要考虑降权。",
         ]
 
     lines = role_lines + [
@@ -240,11 +245,6 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         f"- 确信中等或趋势减速 → {cfg['min_single_weight']:.0%}-{max(0.12, cfg['min_single_weight']):.0%}",
         "- 所有纳入的权重必须不低于最低值，否则会被系统自动裁掉",
         "",
-        "趋势阶段参考：",
-        "ACCELERATING（加速初期）= 最佳窗口，积极配置",
-        "SUSTAINING（持续中）= 可参与，适度配置",
-        "DECELERATING（减速中）= 降权重但不一定拒绝",
-        "REVERSING（反转中）= 建议回避，可参与但需谨慎",
         "",
         "=== 上下文 ===",
         f"当前宏观: {regime_str} | 策略: {strategy}",
@@ -309,7 +309,18 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     # ── Batch candidates and call LLM ──
     A7_BATCH_SIZE = 15
     all_a7_decisions = {}
-    batches = [candidates[i:i + A7_BATCH_SIZE] for i in range(0, len(candidates), A7_BATCH_SIZE)]
+    n_candidates = len(candidates)
+    n_batches = max(1, (n_candidates + A7_BATCH_SIZE - 1) // A7_BATCH_SIZE)
+    # Equidistant sampling: each batch gets a representative slice across
+    # the conviction spectrum, avoiding batch-level quality bias.
+    batches = []
+    for bi in range(n_batches):
+        batch = []
+        for j in range(bi, n_candidates, n_batches):
+            batch.append(candidates[j])
+            if len(batch) >= A7_BATCH_SIZE:
+                break
+        batches.append(batch)
     llm_cfg = settings.get_llm_config("A7")
 
     # Wait for API rate limit cooldown (A5 just finished its LLM call)
@@ -317,16 +328,15 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     time.sleep(3)
 
     for batch_idx, batch in enumerate(batches):
-        batch_start = batch_idx * A7_BATCH_SIZE + 1
         batch_lines = list(lines)  # copy header
 
-        # Candidate display for this batch — unified format, no trend_type split
-        batch_lines.append(f"=== 候选池 批次{batch_idx+1}/{len(batches)} ({len(batch)}只, 按确信度排序) ===")
+        # Candidate display for this batch — equidistant across conviction spectrum
+        batch_lines.append(f"=== 候选池 批次{batch_idx+1}/{len(batches)} ({len(batch)}只) ===")
         for i, c in enumerate(batch):
             code = c["ts_code"]; a2 = a2_data.get(code, {}); ind = code_industry.get(code, "?")
             tier = get_conviction_tier(c.get("conviction", 0), strategy)
             batch_lines.append(
-                f"{batch_start+i:2d}. {code} [{c.get('conviction',0):.2f}/{tier['label']}] "
+                f"{i+1:2d}. {code} [{c.get('conviction',0):.2f}/{tier['label']}] "
                 f"核心:{c.get('fl_core_label','?')}={c.get('fl_core_score',0):.0f} | "
                 f"d3:{c.get('momentum_d3',0):+.1f}% d5:{c.get('momentum_d5',0):+.1f}% "
                 f"d20:{c.get('momentum_d20',0):+.1f}% d60:{c.get('momentum_d60',0):+.1f}% acc:{c.get('momentum_accel',0):+.1f}"
@@ -728,9 +738,9 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             core_label = "FL综合分"
             core_score = sc.get("total_score", 0)  # multi-factor composite from FL engine
             vol_analysis = _vol_analysis(
-                vol_price_5d.get(code, {}).get("amounts", []),
-                vol_price_5d.get(code, {}).get("closes", []),
-            )
+                list(reversed(vol_price_5d.get(code, {}).get("amounts", []))),
+                list(reversed(vol_price_5d.get(code, {}).get("closes", []))),
+            ) if vol_price_5d.get(code) else "量价数据不足"
             cand = {
                 "ts_code": code,
                 "conviction": conv,

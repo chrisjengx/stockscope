@@ -328,8 +328,20 @@ def classify_regime(md):
     if nh < 0.3: notes.append("NH/NL极端,空头主导")
     if vr < 0.7: notes.append("缩量明显,流动性下降")
     elif vr > 1.3: notes.append("放量明显,资金活跃")
-    if vol > 25: notes.append("波动加剧")
+    if vol > 2.0: notes.append("波动加剧")
     if b20 < 30: notes.append("宽度极差,个股普跌")
+
+    # ── Near-term vs medium-term divergence ──
+    # 20-day trend is inherently lagging. A market that was "牛市上升"
+    # for the past 3 weeks may have already turned in the last 5 days.
+    # Flag divergence so A7/A6 LLM gets a complete picture, not stale context.
+    t5_val = md.get("trend_5d", 0) or 0
+    t20_val = md.get("trend_20d", 0) or 0
+    if t20_val > 2 and t5_val < -1:
+        notes.append(f"短期背离: 中期上行(t20={t20_val:+.1f}%)但近5日走弱(t5={t5_val:+.1f}%), 警惕趋势转折")
+    elif t20_val < -2 and t5_val > 1:
+        notes.append(f"短期背离: 中期下行(t20={t20_val:+.1f}%)但近5日反弹(t5={t5_val:+.1f}%), 关注底部确认")
+
     if notes:
         parts.append("; ".join(notes))
 

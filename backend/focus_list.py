@@ -328,7 +328,7 @@ def _volume_pattern(vol_price, avg_vol):
     if p_chg_5d > 0 and vol_ratio[0] > 1.0 and vol_ratio[-1] < vol_ratio[0] and p_chg_1d < 0: return 85
     if p_chg_5d > 0 and max(vol_ratio) < 1.0 and p_chg_5d < 8: return 80
     if max(vol_ratio) > 1.5 and vol_ratio[-1] < 1.0 and abs(p_chg_5d) < 5: return 80
-    if p_chg_5d > 0 and vol_ratio[-1] >= 0.8: return 70
+    if p_chg_5d > 0 and vol_ratio[-1] >= 0.8: return 85
     if abs(p_chg_5d) < 3 and max(vol_ratio) < 1.3 and min(vol_ratio) > 0.7: return 50
     if max(vol_ratio) > 1.3 and abs(p_chg_5d) < 2: return 20
     if p_chg_5d < -3 and vol_ratio[0] > 1.2 and max(vol_ratio[-2:]) < 0.8: return 25
@@ -468,14 +468,14 @@ def rebuild(strategy="long_term"):
 
         # Step 7: Dual-path selection
         if strategy == "hot_picks":
-            # Path 1: 早起上涨 (80) — early_momentum
+            # Path 1: 早起上涨 (60) — early_momentum
             early_ranking = sorted(passing, key=lambda s: -s["early_momentum"])
-            early_picks = {s["ts_code"]: s for s in early_ranking[:80]}
+            early_picks = {s["ts_code"]: s for s in early_ranking[:60]}
             for s in early_picks.values(): s["source_path"] = "早起上涨"
-            # Path 2: 持续上涨 (40) — d5>0 AND d60>0
+            # Path 2: 持续上涨 (60) — d5>0 AND d60>0
             sustained_pool = [s for s in passing if (s["momentum_raw"].get("d5", 0) or 0) > 0 and (s["momentum_raw"].get("d60", 0) or 0) > 0]
             sustained_ranking = sorted(sustained_pool, key=lambda s: -(s["short_momentum"] * 0.5 + s["vol_quality"] * 0.5))
-            sustained_picks = {s["ts_code"]: s for s in sustained_ranking[:40]}
+            sustained_picks = {s["ts_code"]: s for s in sustained_ranking[:60]}
             for s in sustained_picks.values(): s["source_path"] = "持续上涨" if s["ts_code"] not in early_picks else "双路径"
             # Union
             fl_picks = early_picks.copy()
@@ -486,7 +486,7 @@ def rebuild(strategy="long_term"):
                     if len(fl_picks) >= 120: break
                     if s["ts_code"] not in fl_picks: s["source_path"] = "持续上涨"; fl_picks[s["ts_code"]] = s
             # A2 path
-            a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"] and s["short_momentum"] >= 50]
+            a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"] and s["short_momentum"] >= 60]
             a2_ranking = sorted(a2_eligible, key=lambda s: -s["fund_score"])
             a2_picks = {s["ts_code"]: s for s in a2_ranking[:80]}
             for s in a2_picks.values(): s["source_path"] = "A2基本面排名" if s["ts_code"] not in fl_picks else "双路径"
