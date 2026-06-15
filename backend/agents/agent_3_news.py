@@ -253,6 +253,10 @@ def classify_batch(conn, items):
                 r = batch_results[j]
                 # LLM entity linking: use LLM-provided stock codes, validated against DB
                 entities = _build_entities_from_llm(r.get("related_stocks", []))
+                # Affected industries: LLM free-text keywords → stored for A7 context
+                affected = r.get("affected_industries", [])
+                if not isinstance(affected, list):
+                    affected = []
                 all_results.append({
                     "category": r.get("category", "市场评论"),
                     "sentiment": r.get("sentiment", "neutral"),
@@ -265,6 +269,7 @@ def classify_batch(conn, items):
                     "is_breaking": 1 if r.get("is_breaking") else 0,
                     "classification_confidence": 0.8,
                     "llm_insight": r.get("insight", ""),
+                    "affected_industries": affected,
                 })
             else:
                 # Keyword fallback: use regex + string matching entity extraction
@@ -278,6 +283,7 @@ def classify_batch(conn, items):
                     "related_stocks_compat": ",".join(e["code"] for e in entities),
                     "is_breaking": 0, "classification_confidence": 0.3,
                     "llm_insight": "",
+                    "affected_industries": [],
                 })
 
     return all_results
@@ -307,7 +313,7 @@ def _llm_classify_batch(items, cfg):
     lines = [
         "你是财经新闻分析师。识别对A股市场有实质影响的新闻，忽略噪音。",
         "你的分析会影响后续的选股决策——对重大利好/利空不要遗漏。",
-        "对每条新闻输出分类、情感、影响力和一句话洞察。",
+        "对每条新闻输出分类、情感、影响力，以及该新闻影响的行业。",
     ]
     lines.append("")
     for idx, item in enumerate(items):
@@ -317,10 +323,8 @@ def _llm_classify_batch(items, cfg):
     lines.append('[{"idx":0,"category":"行业政策/公司事件/宏观数据/市场评论",')
     lines.append('"sentiment":"positive/negative/neutral","sentiment_intensity":0.0-1.0,')
     lines.append('"impact":"HIGH/MEDIUM/LOW","tags":["..."],"summary":"一句话摘要",')
-    lines.append('"related_stocks":["000001.SZ","600036.SH"],')
+    lines.append('"affected_industries":["新能源","锂电池"],  // 数组内容仅为示例，实际行业由你根据新闻自行判断')
     lines.append('"is_breaking":false,"insight":"这条新闻对A股投资的潜在影响（1-2句话，无影响则留空）"}]')
-    lines.append("")
-    lines.append("related_stocks: 新闻中明确提到的A股公司完整代码(6位代码+交易所后缀,如000001.SZ/600036.SH)。未提及任何具体公司给空数组[]。仅列确实在新闻中出现的公司名对应的代码，切勿猜测或联想。")
 
     result = llm.chat_json("\n".join(lines), model=cfg["model"], max_tokens=cfg["max_tokens"])
     if result:
@@ -379,8 +383,11 @@ def run():
         stored = 0
         for item, cls in zip(new_items, classifications):
             insight = cls.get("llm_insight", "")
-            quant_info = json.dumps({"insight": insight, "is_breaking": cls.get("is_breaking", 0)},
-                                    ensure_ascii=False) if insight else "{}"
+            quant_info = json.dumps({
+                "insight": insight,
+                "is_breaking": cls.get("is_breaking", 0),
+                "affected_industries": cls.get("affected_industries", []),
+            }, ensure_ascii=False)
             conn.execute(
                 """INSERT OR IGNORE INTO news_feed
                    (source, category, tags, sentiment, impact,

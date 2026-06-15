@@ -132,14 +132,23 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         code_industry[r["ts_code"]] = r["industry"] or "其他"
 
     # ── Market background news (moderate weight, context only) ──
+    # Unified: includes both general news and industry-tagged news from A3
     market_news = []
     for r in conn.execute(
-        "SELECT category, sentiment, impact, summary FROM news_feed "
+        "SELECT category, sentiment, impact, summary, quantitative_info FROM news_feed "
         "WHERE published_at >= datetime('now','-3 days') AND impact IN ('HIGH','MEDIUM') "
-        "ORDER BY impact='HIGH' DESC, published_at DESC LIMIT 8"
+        "ORDER BY impact='HIGH' DESC, published_at DESC LIMIT 12"
     ).fetchall():
         sent = {"positive": "➕", "negative": "➖", "neutral": "➡️"}.get(r["sentiment"], "")
-        market_news.append(f"  {sent}[{r['impact']}] {r['category']}: {r['summary'][:80]}")
+        industries_hint = ""
+        try:
+            qi = json.loads(r["quantitative_info"] or "{}")
+            affected = qi.get("affected_industries", [])
+            if affected:
+                industries_hint = " → " + "、".join(affected[:4])
+        except (json.JSONDecodeError, TypeError):
+            pass
+        market_news.append(f"  {sent}[{r['impact']}] {r['category']}{industries_hint}: {r['summary'][:80]}")
     market_news_str = "\n".join(market_news) if market_news else "（近3天无重要新闻）"
 
     # ── Factor exposure summary ──
@@ -259,10 +268,13 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
         f"{'资金流向是短期交易的核心依据，应作为重要决策因子：' if strategy == 'hot_picks' else '强势板块有资金支撑，弱势板块需更强个股逻辑才能纳入。'}"
         f"{'\\n- 资金流入板块 → 降低基本面门槛，顺势而为\\n- 资金流出板块 → 即使技术面尚可，警惕板块拖累，提高纳入门槛\\n- 板块无明确方向 → 依靠个股自身动能' if strategy == 'hot_picks' else ''}",
         f"",
-        f"=== 市场背景新闻（近3天参考，非指令）===",
+        f"=== 近期市场动态（来自新闻，弱参考，勿过度依赖）===",
         f"{market_news_str}",
         "",
-        "注：新闻权重适中，在评估相关股票时可作为背景参考，但不作为主要决策依据。",
+        "注：以上新闻来自A3实时抓取。其中「→ 行业关键词」部分由LLM从新闻内容中提取，",
+        "表示该新闻可能影响这些行业。请自行判断候选股与这些行业动态的关联——",
+        "行业关键词与候选股的行业分类可能不完全一致，以你的独立判断为准。",
+        "新闻信息权重适中，作为理解市场热点和风险方向的背景参考，不作为主要决策依据。",
         "",
     ]
 
