@@ -57,7 +57,7 @@ export StockAgent_DS_API_KEY="your-deepseek-api-key"
 # 1. 拉取数据（全量，约10分钟）
 python -c "from backend.data.fetcher import daily_update; daily_update()"
 
-# 2. 跑首次 Pipeline（两个策略会按顺序独立运行）
+# 2. 跑首次 Pipeline（复用上游结果；FL 之后两个策略独立运行）
 python -m backend.orchestrator --mode daily --strategy both
 
 # 3. 生成报告
@@ -95,7 +95,7 @@ API 服务在 `http://localhost:5001`。
 | `GET /api/reports/fundamental/<ts_code>` | 单股基本面报告 |
 | `GET /api/reports/fusion?strategy=long_term` | A5 融合分析报告 |
 | `GET /api/decisions` | 最新投资决策 |
-| `POST /api/pipeline/run?mode=daily&strategy=both` | 手动触发 Pipeline（两个策略独立运行） |
+| `POST /api/pipeline/run?mode=daily&strategy=both` | 手动触发 Pipeline（复用上游结果；FL 之后独立运行） |
 
 ## 核心设计
 
