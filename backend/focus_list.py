@@ -248,8 +248,8 @@ def _direction_structure(d3, d5, d20, d60):
     return 30
 
 
-def _acceleration_state(accel, accel_prev3):
-    if accel > 5 and accel_prev3: return 95
+def _acceleration_state(accel, is_early_reversal):
+    if accel > 5 and is_early_reversal: return 95
     if accel > 5: return 85
     if accel > 1: return 80
     if accel >= -1: return 60
@@ -268,12 +268,12 @@ def _ma_alignment(ma5, ma10, ma20, ma60):
     return 20
 
 
-def _trend_quality(r, accel_prev3, ma=None):
+def _trend_quality(r, is_early_reversal, ma=None):
     d3 = r.get("momentum_d3") or 0; d5 = r.get("momentum_d5") or 0
     d20 = r.get("momentum_d20") or 0; d60 = r.get("momentum_d60") or 0
     accel = r.get("momentum_accel") or 0; ma = ma or {}
     direction = _direction_structure(d3, d5, d20, d60)
-    acceleration = _acceleration_state(accel, accel_prev3)
+    acceleration = _acceleration_state(accel, is_early_reversal)
     ma_score = _ma_alignment(ma.get("ma5"), ma.get("ma10"), ma.get("ma20"), ma.get("ma60"))
     consistency = _clamp(ma.get("up_day_ratio", 0.5) * 100, 0, 100)
     return direction * 0.30 + acceleration * 0.35 + ma_score * 0.15 + consistency * 0.20
@@ -360,12 +360,12 @@ def _direction_health(d3, d5, d20, d60):
     return _clamp(base + sustained - declining)
 
 
-def _early_momentum_score(r, vol_price, avg_vol, accel_prev3):
+def _early_momentum_score(r, vol_price, avg_vol, is_early_reversal):
     """0-100: Early-stage momentum for hot_picks. Rewards acceleration + volume + trend health."""
     accel = r.get("momentum_accel") or 0; d3 = r.get("momentum_d3") or 0
     d5 = r.get("momentum_d5") or 0; d20 = r.get("momentum_d20") or 0
     d60 = r.get("momentum_d60") or 0
-    accel_q = _acceleration_state(accel, accel_prev3)
+    accel_q = _acceleration_state(accel, is_early_reversal)
     vol_q = _volume_quality(vol_price, avg_vol)
     dir_q = _direction_health(d3, d5, d20, d60)
     return accel_q * 0.40 + vol_q * 0.35 + dir_q * 0.25
@@ -413,8 +413,20 @@ def rebuild(strategy="long_term"):
             vol_q = _volume_quality(vp, av)
             short_mom = _short_momentum({"momentum_d3": m_raw.get("d3", 0), "momentum_d5": m_raw.get("d5", 0), "momentum_d20": m_raw.get("d20", 0)})
             md_fields = {"momentum_d3": m_raw.get("d3", 0), "momentum_d5": m_raw.get("d5", 0), "momentum_d20": m_raw.get("d20", 0), "momentum_d60": m_raw.get("d60", 0), "momentum_accel": m.get("acceleration", 0)}
-            trend_q = _trend_quality(md_fields, (m.get("acceleration", 0) or 0) > 0 and (m_raw.get("d3", 0) or 0) > 0 and ((m_raw.get("d5", 0) or 0) <= 0 or (m_raw.get("d20", 0) or 0) <= 0 or (m_raw.get("d60", 0) or 0) <= 0), md)
-            early_mom = _early_momentum_score(md_fields, vp, av, (m.get("acceleration", 0) or 0) > 0 and (m_raw.get("d3", 0) or 0) > 0 and ((m_raw.get("d5", 0) or 0) <= 0 or (m_raw.get("d20", 0) or 0) <= 0 or (m_raw.get("d60", 0) or 0) <= 0))
+            # Early reversal signal: acceleration is positive, short-term (d3) is rising,
+            # but at least one longer timeframe (d5/d20/d60) has not yet turned positive.
+            # This indicates a fresh reversal rather than a sustained trend — higher reward potential.
+            is_early_reversal = (
+                (m.get("acceleration", 0) or 0) > 0
+                and (m_raw.get("d3", 0) or 0) > 0
+                and (
+                    (m_raw.get("d5", 0) or 0) <= 0
+                    or (m_raw.get("d20", 0) or 0) <= 0
+                    or (m_raw.get("d60", 0) or 0) <= 0
+                )
+            )
+            trend_q = _trend_quality(md_fields, is_early_reversal, md)
+            early_mom = _early_momentum_score(md_fields, vp, av, is_early_reversal)
             # Fundamental score
             fund_from_fallback = False
             if a2 is not None:
@@ -489,7 +501,24 @@ def rebuild(strategy="long_term"):
         conn.execute("DELETE FROM focus_list WHERE strategy=?", (strategy,))
         for i, s in enumerate(selected):
             ts_code = s["ts_code"]
-            total_score = s["fund_score"] if strategy == "long_term" else s["early_momentum"]
+            # Multi-factor total_score: combines primary driver with supporting factors.
+            # All component scores are already computed and in the 0-100 range.
+            if strategy == "long_term":
+                # 2-4 week hold: fundamental quality (50%) + trend timing (30%) + technical confirm (20%)
+                total_score_raw = (
+                    s["fund_score"] * 0.50 +
+                    s["trend_quality"] * 0.30 +
+                    s["tech_score"] * 0.20
+                )
+            else:
+                # 3-5 day hold: momentum burst (50%) + volume confirmation (25%) + direction (15%) + structure (10%)
+                total_score_raw = (
+                    s["early_momentum"] * 0.50 +
+                    s["vol_quality"] * 0.25 +
+                    s["short_momentum"] * 0.15 +
+                    s["trend_quality"] * 0.10
+                )
+            total_score = round(max(0.0, min(100.0, total_score_raw)), 1)
             conn.execute("""INSERT OR REPLACE INTO composite_scores (ts_code, calc_date, strategy, tech_score, fundamental_score, macro_fit, momentum, total_score, rank, tier_action, trend_type, momentum_d3, momentum_d5, momentum_d20, momentum_d60, momentum_accel) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (ts_code, trade_date, strategy, round(s["tech_score"], 1), round(s["fund_score"], 1), 0,
                  composite_momentum_score(s["momentum_raw"], s["trend_type"]) if s["momentum_raw"] else 50,

@@ -62,7 +62,7 @@ def rule_based_checks(decision, holdings, conn, a5_scores=None, fund_reports=Non
 
     # ── Momentum exhaustion: d5 sharply negative ──
     sc = (a5_scores or {}).get(code, {})
-    d5 = sc.get("momentum_d5", 0)
+    d5 = sc.get("momentum_d5") or 0
     if d5 < -5:
         checks.append({"dim": "动量衰竭", "severity": "AMBER",
                        "detail": f"5日动量{d5:.1f}%, 短期趋势显著走弱"})
@@ -74,6 +74,57 @@ def rule_based_checks(decision, holdings, conn, a5_scores=None, fund_reports=Non
     if tech > 70 and rfs >= 3:
         checks.append({"dim": "信号冲突", "severity": "AMBER",
                        "detail": f"技术面强(tech={tech:.0f})但基本面红旗{rfs}个, 需交叉验证"})
+
+    # ── Check 9: Trend Divergence (趋势背离) ──
+    # Short-term bounce (d3>0) but medium AND long term still declining → likely dead-cat bounce.
+    # d60>0 excludes stocks in a long-term uptrend experiencing a normal pullback.
+    sc = (a5_scores or {}).get(code, {})
+    d3 = sc.get("momentum_d3") or 0
+    d20 = sc.get("momentum_d20") or 0
+    d60 = sc.get("momentum_d60") or 0
+    if d3 > 0 and d20 < 0 and d60 < 0:
+        checks.append({"dim": "趋势背离", "severity": "AMBER",
+                       "detail": f"短期反弹但中长期仍下跌(d20={d20:.1f}% d60={d60:.1f}%), 可能是下跌中继"})
+
+    # ── Check 10: Volume-Price Divergence (量价背离) ──
+    # Price rising but volume shrinking + OBV confirms distribution.
+    # Excludes limit-up scenarios (d3>=9) where low volume = strong hold, not weakness.
+    if 0 < d3 < 9:
+        ind_row = conn.execute(
+            "SELECT indicators_json FROM indicators WHERE ts_code=? "
+            "AND calc_date = (SELECT MAX(calc_date) FROM indicators)",
+            (code,),
+        ).fetchone()
+        if ind_row:
+            try:
+                ind = json.loads(ind_row["indicators_json"])
+                vol_ratio = ind.get("volume_ratio") or 1.0
+                obv_trend = ind.get("obv_trend") or "flat"
+                if vol_ratio < 0.7 and obv_trend == "falling":
+                    checks.append({"dim": "量价背离", "severity": "AMBER",
+                                   "detail": f"缩量上涨+资金流出(d3={d3:.1f}% vol_ratio={vol_ratio:.2f} OBV=falling), 上涨真实性存疑"})
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+    # ── Check 11: Acceleration Reversal (加速度反转) ──
+    # Only flags significant deceleration (acc<-5), not mild slowdown during consolidation.
+    # d3 barely positive confirms the trend is stalling, not just pausing.
+    accel = sc.get("momentum_accel") or 0
+    if accel < -5 and 0 < d3 < 3:
+        checks.append({"dim": "加速度反转", "severity": "AMBER",
+                       "detail": f"上涨动能显著衰减(acc={accel:.1f}), 趋势可能见顶"})
+
+    # ── Check 12: Fundamental-Momentum Conflict (基本面-动量矛盾) ──
+    # Two variants: (a) weak fundamentals + extreme momentum → speculative chase
+    #               (b) strong fundamentals + declining price → value trap
+    fund_sc = sc.get("fundamental_score") or 50
+    mom_sc = sc.get("momentum") or 50
+    if fund_sc < 30 and mom_sc > 80:
+        checks.append({"dim": "基本面-动量矛盾", "severity": "AMBER",
+                       "detail": f"基本面弱(fund={fund_sc:.0f})但动量极强(mom={mom_sc:.0f}), 可能纯投机驱动"})
+    elif fund_sc > 70 and d60 < 0:
+        checks.append({"dim": "基本面-动量矛盾", "severity": "AMBER",
+                       "detail": f"基本面好(fund={fund_sc:.0f})但中长期下跌(d60={d60:.1f}%), 可能价值陷阱"})
 
     return checks
 
@@ -170,7 +221,8 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
     # ── A5 composite scores (factor breakdown per stock) ──
     a5_scores = {}
     for r in conn.execute(
-        f"SELECT ts_code, tech_score, fundamental_score, macro_fit, momentum, total_score, rank "
+        f"SELECT ts_code, tech_score, fundamental_score, macro_fit, momentum, total_score, rank, "
+        f"momentum_d3, momentum_d5, momentum_d20, momentum_d60, momentum_accel "
         f"FROM composite_scores WHERE ts_code IN ({ph}) AND strategy=? "
         f"AND calc_date = (SELECT MAX(calc_date) FROM composite_scores WHERE strategy=?)",
         codes + [strategy, strategy],
@@ -372,6 +424,14 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
             "如果一只股票有规则警告(⚠标注)但A7仍然推荐BUY，你必须解释为什么这些警告不影响风险判断。",
             "默认心态: 倾向给更高风险分——不确定时向上取整(3而非2, 4而非3)。",
             "",
+            "审查维度（每个维度都要独立评估）：",
+            "1. 趋势可持续性 — 上涨是结构性（基本面驱动）还是事件性（消息驱动）？催化剂消退后趋势会否逆转？",
+            "2. A7逻辑一致性 — A7的rationale是否与A1/A2数据一致？有没有选择性忽略负面信号？引用A7理由中的具体矛盾点。",
+            "3. 尾部风险 — 最坏情景下该股票可能的跌幅？A7的risk_boundary是否充分覆盖了这个风险？",
+            "4. 宏观逆风 — 当前宏观regime对该股票所在行业是顺风还是逆风？A4板块分析是否提示了行业风险？",
+            "5. 量价真实性 — 上涨是否由真实增量资金推动？有无缩量上涨、对倒诱多等异常信号？参考A1量比和OBV。",
+            "6. 拥挤交易 — 该标的/行业是否被市场广泛关注？A7是否纳入了过多同类型标的（因子拥挤）？",
+            "",
             *score_rubric,
             "",
             f"以上共{len(batch)}只待审股票, 必须全部输出{len(batch)}条review, 缺一不可。少任何一只将视为审查失败。",
@@ -485,37 +545,61 @@ def score_decisions(decisions, holdings, macro, conn, strategy="long_term"):
 
 
 def _apply_adversarial_verdicts(decisions, scores):
-    """Layer 3: ranking-based adversarial elimination.
+    """Layer 3: risk-driven adversarial elimination.
 
-    - BUY: sort by risk_score → top 60% APPROVED (floor 3, ceiling 12)
-      - risk_score >= 4 → forced VETOED regardless of rank
+    Phase 1: risk_score 1-2 → auto-APPROVED (low risk, no need to compete)
+              risk_score 5   → forced VETOED  (critical risk, always block)
+    Phase 2: risk_score 3-4 → elimination pool, sorted by risk_score ascending
+              top 60% survive (floor 3), remaining VETOED
+
     - SELL/HOLD/REDUCE: all APPROVED (don't block risk management)
     """
     buys = [(d, s) for d, s in zip(decisions, scores) if d.get("action") == "BUY"]
     others = [(d, s) for d, s in zip(decisions, scores) if d.get("action") != "BUY"]
 
-    buys.sort(key=lambda x: x[1].get("risk_score", 3))
-    n = len(buys)
-    cutoff = max(min(3, n), min(12, int(n * 0.6)))  # floor min(3,n), ceiling 12
-
-    for i, (d, s) in enumerate(buys):
+    # Phase 1: force-VETO risk=5, auto-APPROVE risk=1-2
+    # Phase 2: risk=3-4 enter elimination pool
+    elimination_pool = []
+    for d, s in buys:
         risk = s.get("risk_score", 3)
-        if risk >= 4:
+        if risk >= 5:
             s["final_verdict"] = "VETOED"
-            s["veto_reason"] = f"risk_score={risk}>=4, 强制否决"
-        elif i < cutoff:
+            s["veto_reason"] = f"risk_score={risk}>=5, 致命风险强制否决"
+        elif risk <= 2:
+            s["final_verdict"] = "APPROVED"
+        else:
+            elimination_pool.append((d, s))
+
+    # Elimination pool: sort by risk (lower = better), top 60% survive
+    elimination_pool.sort(key=lambda x: x[1].get("risk_score", 3))
+    n_pool = len(elimination_pool)
+    cutoff = max(3, int(n_pool * 0.6))  # floor 3, no ceiling needed (risk>=5 already filtered)
+
+    for i, (d, s) in enumerate(elimination_pool):
+        if i < cutoff:
             s["final_verdict"] = "APPROVED"
         else:
             s["final_verdict"] = "VETOED"
-            s["veto_reason"] = f"排名{i+1}/{n}, 超出组合容量(前{cutoff}只)"
+            s["veto_reason"] = f"淘汰池排名{i+1}/{n_pool}, 超出容量(前{cutoff}只)"
 
-    # SELL/HOLD/REDUCE: all APPROVED
+    # SELL/HOLD/REDUCE: all APPROVED (unchanged)
     for d, s in others:
         s["final_verdict"] = "APPROVED"
 
-    approved = sum(1 for _, s in buys if s.get("final_verdict") == "APPROVED")
-    vetoed = sum(1 for _, s in buys if s.get("final_verdict") == "VETOED")
-    logger.info(f"A6 verdict: {approved} APPROVED + {vetoed} VETOED (from {n} BUY, cutoff={cutoff})")
+    # Logging
+    n_auto_approved = sum(1 for _, s in buys if s.get("risk_score", 3) <= 2)
+    n_elimination = len(elimination_pool)
+    approved_in_pool = min(cutoff, n_pool)
+    vetoed_in_pool = max(0, n_pool - cutoff)
+    forced_veto = sum(1 for _, s in buys if s.get("risk_score", 3) >= 5)
+    total_approved = n_auto_approved + approved_in_pool
+    total_vetoed = forced_veto + vetoed_in_pool
+
+    logger.info(
+        f"A6 verdict: {n_auto_approved} auto-APPROVED + {approved_in_pool}/{n_elimination} "
+        f"pool-approved + {vetoed_in_pool} pool-vetoed + {forced_veto} forced-veto = "
+        f"{total_approved} APPROVED + {total_vetoed} VETOED (from {len(buys)} BUY)"
+    )
 
     return scores
 
@@ -560,7 +644,9 @@ def run(trade_date=None, strategy="long_term"):
         ph = ",".join("?" * len(codes))
         a5_scores = {}
         for r in conn.execute(
-            f"SELECT ts_code, tech_score, momentum_d5 FROM composite_scores "
+            f"SELECT ts_code, tech_score, momentum_d5, momentum_d3, momentum_d20, "
+            f"momentum_d60, momentum_accel, fundamental_score, momentum, total_score "
+            f"FROM composite_scores "
             f"WHERE ts_code IN ({ph}) AND calc_date=(SELECT MAX(calc_date) FROM composite_scores)",
             codes,
         ).fetchall():

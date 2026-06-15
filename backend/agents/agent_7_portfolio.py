@@ -722,10 +722,10 @@ def run(mode="daily", trade_date=None, strategy="long_term"):
             shares = max(100, int(available_cash * buy_weight / price / 100) * 100)
 
             fs = fl_scores.get(code, {})
-            fl_vs = fs.get("value")       # fundamental_score
-            fl_ms = fs.get("momentum")     # short_momentum
-            core_label = "基本面分" if strategy == "long_term" else "早期动量"
-            core_score = fl_vs if strategy == "long_term" else fl_ms
+            # FL综合分 is the multi-factor total_score from composite_scores,
+            # now computed as weighted combination of primary driver + supporting factors.
+            core_label = "FL综合分"
+            core_score = sc.get("total_score", 0)  # multi-factor composite from FL engine
             vol_analysis = _vol_analysis(
                 vol_price_5d.get(code, {}).get("amounts", []),
                 vol_price_5d.get(code, {}).get("closes", []),
