@@ -307,14 +307,20 @@ def _trend_quality(r, is_early_reversal, ma=None):
     d20 = r.get("momentum_d20") or 0; d60 = r.get("momentum_d60") or 0
     accel = r.get("momentum_accel") or 0; ma = ma or {}
     direction = _direction_structure(d3, d5, d20, d60)
-    acceleration = _acceleration_state(accel, is_early_reversal, d20, d60, d3)
     ma_score = _ma_alignment(ma.get("ma5"), ma.get("ma10"), ma.get("ma20"), ma.get("ma60"))
     consistency = _clamp(ma.get("up_day_ratio", 0.5) * 100, 0, 100)
-    # In confirmed uptrend, direction dominates (the trend IS the signal).
-    # Acceleration matters more when the trend is still forming (early reversal).
     in_uptrend = d20 > 0 and d60 > 0
     if in_uptrend:
-        return direction * 0.45 + acceleration * 0.20 + ma_score * 0.15 + consistency * 0.20
+        # Confirmed uptrend: direction IS the signal. Acceleration (d3 vs d5 speed
+        # comparison) is noise — d5越大d3越难跑赢, punishing sustained runners.
+        # Instead, check only whether short-term is still rising (d3 direction).
+        if d3 > 2:        short_term_ok = 85   # strong continuation
+        elif d3 > 0:      short_term_ok = 70   # still rising, healthy
+        elif d3 > -2:     short_term_ok = 50   # stalling
+        else:             short_term_ok = 30   # short-term reversal
+        return direction * 0.45 + short_term_ok * 0.20 + ma_score * 0.15 + consistency * 0.20
+    # Trend not yet confirmed — acceleration matters for early reversal validation.
+    acceleration = _acceleration_state(accel, is_early_reversal, d20, d60, d3)
     return direction * 0.30 + acceleration * 0.35 + ma_score * 0.15 + consistency * 0.20
 
 
