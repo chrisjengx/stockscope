@@ -517,7 +517,20 @@ def rebuild(strategy="long_term"):
             a2_picks = {s["ts_code"]: s for s in a2_ranking[:120]}
             for s in a2_picks.values(): s["source_path"] = "A2基本面排名"
             fl_ranking = sorted(passing, key=lambda s: -s["trend_quality"])
-            fl_picks = {s["ts_code"]: s for s in fl_ranking[:80]}
+            fl_picks = {}
+            for s in fl_ranking:
+                if len(fl_picks) >= 80: break
+                # FL quality floor: ≥2 HIGH-severity red flags = reliable signal
+                # of genuine fundamental deterioration. Single HIGH flag could be
+                # a lagging indicator on a turn-around story; two+ means real trouble.
+                a2_rpt = a2_cache.get(s["ts_code"])
+                if a2_rpt is not None:
+                    rfs = a2_rpt.get("red_flags", [])
+                    if isinstance(rfs, list):
+                        high_n = sum(1 for rf in rfs if isinstance(rf, dict) and rf.get("severity") == "HIGH")
+                        if high_n >= 2:
+                            continue
+                fl_picks[s["ts_code"]] = s
             for s in fl_picks.values(): s["source_path"] = "FL技术排名" if s["ts_code"] not in a2_picks else "双路径"
 
         # Union
