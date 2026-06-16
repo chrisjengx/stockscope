@@ -242,12 +242,12 @@ def _direction_structure(d3, d5, d20, d60):
     """
     s = (1 if d3 > 0 else 0, 1 if d5 > 0 else 0, 1 if d20 > 0 else 0, 1 if d60 > 0 else 0)
     # ── Tier 1: all timeframes aligned up ──
-    if s == (1, 1, 1, 1): return 95    # 全周期共振上涨 — 最强信号
+    if s == (1, 1, 1, 1): return 90    # 全周期共振上涨 — 最强信号
     # ── Tier 2: strong uptrend with one minor concern ──
-    if s == (0, 1, 1, 1): return 75    # 上升中小回调(d3微跌,中长期全涨) — 经典买点
-    if s == (1, 1, 0, 1): return 75    # 短中周涨,20日有回调 — 趋势持续中
-    if s == (1, 0, 1, 1): return 70    # 回调结束(d3翻正确认反弹,d5仍负因回调深,中长期涨)
-    if s == (1, 1, 1, 0): return 70    # 短中周全涨,长期未翻正 — 早期反转
+    if s == (0, 1, 1, 1): return 70    # 上升中小回调(d3微跌,中长期全涨) — 经典买点
+    if s == (1, 1, 0, 1): return 85    # 短中周涨,20日有回调 — 趋势持续中
+    if s == (1, 0, 1, 1): return 80    # 回调结束(d3翻正确认反弹,d5仍负因回调深,中长期涨)
+    if s == (1, 1, 1, 0): return 75    # 短中周全涨,长期未翻正 — 早期反转
     # ── Tier 3: positive but with notable concerns ──
     if s == (1, 1, 0, 0): return 60    # 短期(3日+5日)上涨确立,中长期待确认
     if s == (1, 0, 0, 1): return 55    # 长期上升中,3日反弹(5日+20日中间有回调)
@@ -267,11 +267,26 @@ def _direction_structure(d3, d5, d20, d60):
     return 30  # unreachable — all 16 patterns covered above
 
 
-def _acceleration_state(accel, is_early_reversal):
+def _acceleration_state(accel, is_early_reversal, d20=0, d60=0, d3=0):
+    # Early reversal + positive accel = strongest signal (fresh breakout)
     if accel > 5 and is_early_reversal: return 95
     if accel > 5: return 85
     if accel > 1: return 80
-    if accel >= -1: return 60
+    if accel >= -1: return 65
+    # In confirmed uptrend, d3>0 means short-term momentum is still positive.
+    # Deceleration (d3<d5) in this context is healthy consolidation, not exhaustion.
+    # Math: d5越大→d3越难跑赢→负accel是数学必然，不是趋势衰竭。
+    in_uptrend = (d20 or 0) > 0 and (d60 or 0) > 0
+    d3_still_rising = (d3 or 0) > 0
+    if in_uptrend and d3_still_rising:
+        if accel >= -3: return 60
+        if accel >= -5: return 55
+        return 45  # d3>0, uptrend intact — even severe decel isn't a reversal
+    if in_uptrend:
+        if accel >= -3: return 50
+        if accel >= -5: return 42
+        return 30  # genuine dip within uptrend
+    # No confirmed trend — deceleration is more concerning (dead cat risk)
     if accel >= -5: return 35
     return 15
 
@@ -292,9 +307,14 @@ def _trend_quality(r, is_early_reversal, ma=None):
     d20 = r.get("momentum_d20") or 0; d60 = r.get("momentum_d60") or 0
     accel = r.get("momentum_accel") or 0; ma = ma or {}
     direction = _direction_structure(d3, d5, d20, d60)
-    acceleration = _acceleration_state(accel, is_early_reversal)
+    acceleration = _acceleration_state(accel, is_early_reversal, d20, d60, d3)
     ma_score = _ma_alignment(ma.get("ma5"), ma.get("ma10"), ma.get("ma20"), ma.get("ma60"))
     consistency = _clamp(ma.get("up_day_ratio", 0.5) * 100, 0, 100)
+    # In confirmed uptrend, direction dominates (the trend IS the signal).
+    # Acceleration matters more when the trend is still forming (early reversal).
+    in_uptrend = d20 > 0 and d60 > 0
+    if in_uptrend:
+        return direction * 0.45 + acceleration * 0.20 + ma_score * 0.15 + consistency * 0.20
     return direction * 0.30 + acceleration * 0.35 + ma_score * 0.15 + consistency * 0.20
 
 
@@ -384,7 +404,7 @@ def _early_momentum_score(r, vol_price, avg_vol, is_early_reversal):
     accel = r.get("momentum_accel") or 0; d3 = r.get("momentum_d3") or 0
     d5 = r.get("momentum_d5") or 0; d20 = r.get("momentum_d20") or 0
     d60 = r.get("momentum_d60") or 0
-    accel_q = _acceleration_state(accel, is_early_reversal)
+    accel_q = _acceleration_state(accel, is_early_reversal, d20, d60, d3)
     vol_q = _volume_quality(vol_price, avg_vol)
     dir_q = _direction_health(d3, d5, d20, d60)
     return accel_q * 0.40 + vol_q * 0.35 + dir_q * 0.25
@@ -523,11 +543,19 @@ def rebuild(strategy="long_term"):
             # Multi-factor total_score: combines primary driver with supporting factors.
             # All component scores are already computed and in the 0-100 range.
             if strategy == "long_term":
-                # 2-4 week hold: fundamental quality (50%) + trend timing (30%) + technical confirm (20%)
+                # 2-4 week hold: fundamental quality + trend timing + technical confirm.
+                # Base weights: fund 50% / trend 30% / tech 20%.
+                # When fundamental data is thin (low LLM confidence), shift weight
+                # to observable factors: trend and price tell their own story.
+                conf = s.get("fund_conf", 0.5)
+                fw = 0.50 * max(0.1, conf)   # fund weight proportional to confidence
+                released = 0.50 - fw
+                tw = 0.30 + released * 0.6   # trend gets 60% of released weight
+                pw = 0.20 + released * 0.4   # tech gets 40% of released weight
                 total_score_raw = (
-                    s["fund_score"] * 0.50 +
-                    s["trend_quality"] * 0.30 +
-                    s["tech_score"] * 0.20
+                    s["fund_score"] * fw +
+                    s["trend_quality"] * tw +
+                    s["tech_score"] * pw
                 )
             else:
                 # 3-5 day hold: momentum burst (50%) + volume confirmation (25%) + direction (15%) + structure (10%)
