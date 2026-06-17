@@ -2,8 +2,8 @@
 Focus List Manager — unified factor engine (merged A5 + FL).
 
 Two strategies, each with dual-path selection:
-  long_term: A2 fundamental ranking (120) + FL trend_quality (80) → union
-  hot_picks: 早起上涨 early_momentum (80) + 持续上涨 d5>0+d60>0 (40) → union
+  long_term: A2 fundamental ranking (100) + FL trend_quality (60) → union
+  hot_picks: 早起上涨 early_momentum (50) + 持续上涨 d5>0+d60>0 (50) → union
 
 All factor computation is pure math — no LLM in the scoring path.
 A2's LLM analysis (fundamental_reports) is consumed as structured data.
@@ -142,14 +142,14 @@ def _gate_hot_picks(a2, vol_quality, d3, d5, d60):
         if len(rfs) >= 5 and len(high_rfs) >= 3:
             return False, f"多项高风险红旗({len(high_rfs)}HIGH/{len(rfs)}total)"
     # Gate 2: volume floor
-    if vol_quality < 30:
-        return False, f"无量上涨(量价质量{vol_quality:.0f}<30)"
+    if vol_quality < 35:
+        return False, f"无量上涨(量价质量{vol_quality:.0f}<35)"
     # Gate 3: trend direction
     if (d5 or 0) < 0 and (d60 or 0) < 0:
         return False, f"下跌趋势(d5={d5:.0f}%<0 d60={d60:.0f}%<0)"
-    # Gate 4: short-term must be rising
-    if (d3 or 0) <= 0:
-        return False, f"短期未涨(d3={d3:.0f}%≤0)"
+    # Gate 4: short-term must be meaningfully rising
+    if (d3 or 0) < 1:
+        return False, f"短期未涨(d3={d3:.0f}%<1)"
     return True, "PASS"
 
 
@@ -158,8 +158,8 @@ def _gate_long_term(a2, d20, d60):
     # Gate 1: fundamental floor
     if a2 is not None:
         fs = a2.get("fundamental_score")
-        if fs is not None and fs < 30:
-            return False, f"基本面过弱(评分{fs:.0f}<30)"
+        if fs is not None and fs < 35:
+            return False, f"基本面过弱(评分{fs:.0f}<35)"
     # Gate 2: trend direction
     if (d20 or 0) < 0 and (d60 or 0) < 0:
         return False, f"下跌趋势(d20={d20:.0f}%<0 d60={d60:.0f}%<0)"
@@ -494,38 +494,38 @@ def rebuild(strategy="long_term"):
 
         # Step 7: Dual-path selection
         if strategy == "hot_picks":
-            # Path 1: 早起上涨 (60) — early_momentum
+            # Path 1: 早起上涨 (50) — early_momentum
             early_ranking = sorted(passing, key=lambda s: -s["early_momentum"])
-            early_picks = {s["ts_code"]: s for s in early_ranking[:60]}
+            early_picks = {s["ts_code"]: s for s in early_ranking[:50]}
             for s in early_picks.values(): s["source_path"] = "早起上涨"
-            # Path 2: 持续上涨 (60) — d5>0 AND d60>0
+            # Path 2: 持续上涨 (50) — d5>0 AND d60>0
             sustained_pool = [s for s in passing if (s["momentum_raw"].get("d5", 0) or 0) > 0 and (s["momentum_raw"].get("d60", 0) or 0) > 0]
             sustained_ranking = sorted(sustained_pool, key=lambda s: -(s["short_momentum"] * 0.5 + s["vol_quality"] * 0.5))
-            sustained_picks = {s["ts_code"]: s for s in sustained_ranking[:60]}
+            sustained_picks = {s["ts_code"]: s for s in sustained_ranking[:50]}
             for s in sustained_picks.values(): s["source_path"] = "持续上涨" if s["ts_code"] not in early_picks else "双路径"
             # Union
             fl_picks = early_picks.copy()
             for code, s in sustained_picks.items():
                 if code not in fl_picks: fl_picks[code] = s
-            if len(fl_picks) < 120:
+            if len(fl_picks) < 100:
                 for s in sustained_ranking:
-                    if len(fl_picks) >= 120: break
+                    if len(fl_picks) >= 100: break
                     if s["ts_code"] not in fl_picks: s["source_path"] = "持续上涨"; fl_picks[s["ts_code"]] = s
             # A2 path
             a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"] and s["short_momentum"] >= 60]
             a2_ranking = sorted(a2_eligible, key=lambda s: -s["fund_score"])
-            a2_picks = {s["ts_code"]: s for s in a2_ranking[:80]}
+            a2_picks = {s["ts_code"]: s for s in a2_ranking[:60]}
             for s in a2_picks.values(): s["source_path"] = "A2基本面排名" if s["ts_code"] not in fl_picks else "双路径"
         else:
-            # long_term: A2 (120) + FL trend_quality (80)
+            # long_term: A2 (100) + FL trend_quality (60)
             a2_eligible = [s for s in passing if s["has_a2"] and not s["fund_from_fallback"]]
             a2_ranking = sorted(a2_eligible, key=lambda s: -s["fund_score"])
-            a2_picks = {s["ts_code"]: s for s in a2_ranking[:120]}
+            a2_picks = {s["ts_code"]: s for s in a2_ranking[:100]}
             for s in a2_picks.values(): s["source_path"] = "A2基本面排名"
             fl_ranking = sorted(passing, key=lambda s: -s["trend_quality"])
             fl_picks = {}
             for s in fl_ranking:
-                if len(fl_picks) >= 80: break
+                if len(fl_picks) >= 60: break
                 # FL quality floor: ≥2 HIGH-severity red flags = reliable signal
                 # of genuine fundamental deterioration. Single HIGH flag could be
                 # a lagging indicator on a turn-around story; two+ means real trouble.
