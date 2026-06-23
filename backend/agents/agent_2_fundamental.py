@@ -776,8 +776,11 @@ def run(tiers=None, trade_date=None, strategy="long_term"):
 
             flags = detect_red_flags(metrics)
             llm_result = None
-            if settings.ds_api_key:
-                llm_result = analyze_fundamental_narrative(code, stock_name, metrics, flags)
+            try:
+                if settings.ds_api_key:
+                    llm_result = analyze_fundamental_narrative(code, stock_name, metrics, flags)
+            except Exception:
+                logger.warning(f"  LLM failed for {code}, saving raw metrics only")
 
             save_fundamental_report(conn, code, trade_date, metrics, flags, llm_result)
             _save_financials_compat(conn, code, trade_date, metrics, llm_result)
