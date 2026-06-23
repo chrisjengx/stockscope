@@ -113,10 +113,10 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
             if rep is None:
                 continue
             a2_data[r["ts_code"]] = {
-                "eq": rep.get("earnings_quality", {}).get("rating", "?"),
-                "gq": rep.get("growth_quality", {}).get("rating", "?"),
-                "fh": rep.get("financial_health", {}).get("rating", "?"),
-                "val": rep.get("valuation", {}).get("rating", "?"),
+                "eq": (rep.get("earnings_quality") or {}).get("rating", "?"),
+                "gq": (rep.get("growth_quality") or {}).get("rating", "?"),
+                "fh": (rep.get("financial_health") or {}).get("rating", "?"),
+                "val": (rep.get("valuation") or {}).get("rating", "?"),
                 "rfs": [f"{rf.get('severity','?')}:{rf.get('flag','?')}" for rf in rep.get("red_flags", [])],
                 "conf": rep.get("confidence", 0),
                 "narrative": rep.get("narrative", ""),
