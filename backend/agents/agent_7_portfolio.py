@@ -110,6 +110,8 @@ def llm_construct_portfolio(candidates, holdings_sells, macro_report, fusion_rep
     ).fetchall():
         try:
             rep = json.loads(r["report_json"])
+            if rep is None:
+                continue
             a2_data[r["ts_code"]] = {
                 "eq": rep.get("earnings_quality", {}).get("rating", "?"),
                 "gq": rep.get("growth_quality", {}).get("rating", "?"),
