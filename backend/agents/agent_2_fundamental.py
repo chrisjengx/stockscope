@@ -356,7 +356,7 @@ def fetch_financials(ts_code: str) -> tuple[dict | None, str]:
     bs_data = fetch_from_baostock(ts_code)
     if bs_data:
         metrics = extract_baostock_metrics(bs_data, ts_code)
-        if metrics and metrics.get("quarters"):
+        if metrics:
             supplement_from_akshare(ts_code, metrics)
             _supplement_from_10jqka(ts_code, metrics)
             return metrics, metrics.get("data_source", "baostock")
