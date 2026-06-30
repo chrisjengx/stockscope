@@ -905,8 +905,8 @@ def _scheduler_loop():
                 logger.info("Scheduler: 08:30 stopping A2 Worker (graceful shutdown)")
                 _a2_worker_active = False
 
-        # ── Data fetch: 13:15 (targeted: HOLDING+FAVORED+NEUTRAL only) ──
-        if hour == 13 and minute >= 15 and minute < 20 and _should_trigger("data_fetch_13", 300):
+        # ── Data fetch: 13:15 (targeted: HOLDING+FAVORED+NEUTRAL only) ──  已禁用
+        if False and hour == 13 and minute >= 15 and minute < 20 and _should_trigger("data_fetch_13", 300):
             logger.info("Scheduler: 13:15 data fetch (targeted: HOLDING+FAVORED+NEUTRAL)")
             try:
                 from backend.data.fetcher import daily_update
@@ -914,8 +914,8 @@ def _scheduler_loop():
             except Exception as e:
                 logger.error(f"Scheduler data fetch 13:15 failed: {e}")
 
-        # ── Pipeline + HTML report: 14:00 ──
-        if hour == 14 and minute >= 0 and minute < 5 and _should_trigger("pipeline_14"):
+        # ── Pipeline + HTML report: 14:00 ──  已禁用
+        if False and hour == 14 and minute >= 0 and minute < 5 and _should_trigger("pipeline_14"):
             logger.info("Scheduler: 14:05 pipeline both + HTML report")
             try:
                 from backend.orchestrator import get_orchestrator

@@ -27,6 +27,8 @@ def update_stock_list():
     new_count = 0
     for _, row in df.iterrows():
         code = str(row["code"]).zfill(6)
+        if code.startswith("920"):
+            continue
         market = "SH" if code.startswith(("6", "5", "9")) else "SZ"
         ts_code = f"{code}.{market}"
         conn.execute(
